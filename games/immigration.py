@@ -340,27 +340,36 @@ def _advance(s: dict[str, Any]) -> None:
 # 画面描画
 # ---------------------------------------------------------------------------
 
-def _timer_bar(s: dict[str, Any], left: float) -> None:
-    """残り時間のバー。仕様どおり画面の一番上に置く。"""
-    ratio = max(0.0, min(1.0, left / TIME_LIMIT_SEC))
+def _render_status(s: dict[str, Any], left: float) -> None:
+    """画面上部の状況表示。残り時間もここに含める。
+
+    「残り時間」の数字はこの関数ごと fragment の中で描き直される。ここを
+    fragment の外に置くとページ全体が再実行されるまで数字が固まったままになり、
+    いちばん目立つ場所が止まって見えてしまう。
+    """
+    ui.metric_row([
+        ("審査中", f"{s['round_no'] + 1} / {TOTAL_ARRIVALS} 人目"),
+        ("正解数", f"{s['score']} / {s['arrivals_judged']}"),
+        ("残り質問回数", s["questions_left"]),
+        ("残り時間", f"{left:.0f} 秒"),
+    ])
+
+    st.progress(max(0.0, min(1.0, left / TIME_LIMIT_SEC)))
     if left <= 0:
         st.error("⏱️ 時間切れ")
     elif left <= TIME_WARN_SEC:
         st.warning(f"⏱️ 残り **{left:.0f}** 秒 — 急いで判定を")
-    else:
-        st.caption(f"⏱️ 残り {left:.0f} 秒")
-    st.progress(ratio)
 
 
 @st.fragment(run_every="1s")
-def _render_timer_live(s: dict[str, Any]) -> None:
-    """審査中の残り時間を1秒ごとに更新する。
+def _render_status_live(s: dict[str, Any]) -> None:
+    """審査中の上部表示を1秒ごとに更新する。
 
-    fragment なのでページ全体を再実行せずにここだけが刻む。時間切れになった
-    瞬間だけアプリ全体を再実行して、結果画面へ切り替える。
+    fragment なのでページ全体（書類・会話ログ・ボタン）は再実行されず、
+    ここだけが刻む。時間切れになった瞬間だけアプリ全体を再実行して結果画面に移る。
     """
     left = tick_timer(s, time.time())
-    _timer_bar(s, left)
+    _render_status(s, left)
     if left <= 0 and s["phase"] == "asking":
         _timeout(s)
         st.rerun(scope="app")
@@ -466,18 +475,12 @@ def render() -> None:
 
     arrival = s["current_arrival"]
 
-    ui.metric_row([
-        ("審査中", f"{s['round_no'] + 1} / {TOTAL_ARRIVALS} 人目"),
-        ("正解数", f"{s['score']} / {s['arrivals_judged']}"),
-        ("残り質問回数", s["questions_left"]),
-        ("残り時間", f"{s['time_left']:.0f} 秒"),
-    ])
-
-    # 仕様どおり残り時間は画面の一番上に。審査中だけ実際に時計を進める。
+    # 仕様どおり残り時間は画面の一番上。審査中だけ1秒ごとに刻み、
+    # 判定後は止まった値をそのまま静かに表示する。
     if s["phase"] == "asking":
-        _render_timer_live(s)
+        _render_status_live(s)
     else:
-        _timer_bar(s, float(s["time_left"]))
+        _render_status(s, float(s["time_left"]))
 
     st.divider()
 
