@@ -42,7 +42,6 @@ def render_home() -> None:
     st.markdown(
         """
         <h1 class="hub-title">🎮 ミニゲーム統合プラットフォーム</h1>
-        <div class="hub-sub">4つの世界。どれも5〜10分で決着がつく。</div>
         <div class="hub-rule"></div>
         """,
         unsafe_allow_html=True,

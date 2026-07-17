@@ -1,1 +1,3 @@
-streamlit>=1.30
+# utils/theme.py の CSS は Streamlit の data-testid（stIconMaterial 等）に依存するため、
+# 古いバージョンでは見た目が崩れる。動作確認は 1.59.2 で行っている。
+streamlit>=1.59

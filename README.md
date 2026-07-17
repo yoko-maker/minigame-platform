@@ -33,6 +33,28 @@ py -3 -m streamlit run app.py
 > （`Scripts` ディレクトリを PATH に追加すれば `streamlit run app.py` も使えるようになります。）
 各ゲーム画面の上部の **🏠 戻る** でホームへ、**🔄 リセット** でそのゲームを最初からやり直せます。
 
+## 公開（Streamlit Community Cloud）
+
+GitHub のリポジトリからそのまま常時公開できる。無料枠では **リポジトリを public に
+する必要がある** 点に注意。
+
+1. このリポジトリを GitHub（`yoko-maker/minigame-platform`）に push する。
+2. [share.streamlit.io](https://share.streamlit.io) に GitHub アカウントでサインインする。
+3. **Create app** →「Deploy a public app from GitHub」を選ぶ。
+4. 次のとおり指定して Deploy を押す。
+
+   | 項目 | 値 |
+   |---|---|
+   | Repository | `yoko-maker/minigame-platform` |
+   | Branch | `main` |
+   | Main file path | `app.py` |
+
+以降は `main` に push するたびに自動で再デプロイされる。依存は `requirements.txt`
+から、テーマ以外の設定は `.streamlit/config.toml` から読まれる。
+
+> Community Cloud の無料枠はしばらくアクセスが無いとアプリがスリープし、次の
+> アクセス時に自動で復帰する（初回表示が数十秒かかることがある）。
+
 ## ディレクトリ構成
 
 ```

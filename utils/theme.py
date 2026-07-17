@@ -139,10 +139,23 @@ def _css(t: dict[str, str]) -> str:
 [data-testid="stMain"] .stMarkdown,
 [data-testid="stMain"] p,
 [data-testid="stMain"] li,
-[data-testid="stMain"] label,
-[data-testid="stMain"] span {{
+[data-testid="stMain"] label {{
     color: {t["text"]};
     font-family: {t["font_ui"]};
+}}
+
+/* Streamlit のアイコン（展開の▼など）は "Material Symbols Rounded" の合字で
+   描かれる。本文フォントを継承させると合字が解決されず "arrow_drop_down" の
+   ような名前が生のまま出てしまうため、アイコンだけは必ず元のフォントに戻す。 */
+[data-testid="stIconMaterial"],
+span[class*="material-symbols"],
+span[class*="material-icons"] {{
+    font-family: "Material Symbols Rounded" !important;
+    font-feature-settings: "liga" !important;
+    -webkit-font-feature-settings: "liga" !important;
+    font-weight: normal !important;
+    letter-spacing: normal !important;
+    text-indent: 0 !important;
 }}
 [data-testid="stMain"] h1,
 [data-testid="stMain"] h2,
@@ -284,7 +297,6 @@ hr, [data-testid="stDivider"] {{ border-color: {t["line"]}; }}
     font-weight: 800;
     margin: 0;
 }}
-.hub-sub {{ color: {t["muted"]}; margin-top: .4rem; }}
 .hub-rule {{
     height: 1px;
     margin: 1.5rem 0 2rem;
