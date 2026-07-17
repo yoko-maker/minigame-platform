@@ -1,0 +1,11 @@
+# 基本テーマ。ホームと4ゲーム中3つが暗い世界なので dark を土台にし、
+# 明るい「癒し猫カフェ」を含む各ページの色は utils/theme.py の CSS で上書きする。
+[theme]
+base = "dark"
+backgroundColor = "#0A0B0F"
+secondaryBackgroundColor = "#14161D"
+textColor = "#E7E9EE"
+primaryColor = "#E7E9EE"
+
+[browser]
+gatherUsageStats = false
