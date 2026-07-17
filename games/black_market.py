@@ -142,11 +142,15 @@ HOW_TO_PLAY = f"""
 - 商品の**真の価値は隠されている**。「情報を購入する」で噂・簡易鑑定・市場価格を買うと、
   価値の手がかり（推定値）が得られる。ただし情報にはコストがかかり、精度も異なる
   （市場価格 > 簡易鑑定 > 噂 の順に高精度・高コスト）。
-- 情報を検討したら「入札を開始する」で交渉スタート。AIがまず金額を提示してくるので、
-  上回る金額を提示するか、諦めるか選ぼう。AIの性格（コレクター/投資家/転売屋）によって
-  強気度やブラフの出し方が異なる。
+- 情報を検討したら「入札を開始する」で交渉スタート。
+- **競争相手は3人（コレクター/投資家/転売屋）が同じ卓に着いています。** それぞれ胸の内に
+  出せる上限を持ち、あなたの入札に対して独立に「乗る」か「降りる」かを決めます。
+  **全員が降りて初めてあなたの落札**です。誰か1人でも乗れば競りは続きます。
+- 3人は好みが違います。コレクターは絵画と古書、投資家は宝石、転売屋はUSBと薬品に
+  強く出ます。品物を見れば、誰が最後まで食い下がるかが読めます。
 - 落札できれば **(真の価値 − 支払額 − 情報コスト)** が利益。競り負けたら情報コストだけが
-  損失になる（払いすぎにも情報の買いすぎにも注意）。
+  損失になる（払いすぎにも情報の買いすぎにも注意）。決着後に相手の上限が開示されるので、
+  次のラウンドの読みに使えます。
 - 全{TOTAL_ROUNDS}回終了時点の累計利益が **+{TARGET_PROFIT}** 以上なら勝利。
 """
 
@@ -234,6 +238,70 @@ def settle(won: bool, price_paid: int, true_value: int, info_cost_total: int) ->
 
 
 # ---------------------------------------------------------------------------
+# 競争相手（3体同席）
+#
+# 3つの性格が同じ卓に着く。それぞれ自分の上限を持ち、プレイヤーの入札に対して
+# 独立に「乗る／降りる」を決める。誰かが乗れば競りは続き、全員が降りて初めて
+# プレイヤーの落札になる。何が好きな相手なのかを読むと、どこまで積めば全員を
+# 振り切れるかが見えてくる。
+# ---------------------------------------------------------------------------
+
+def create_rivals(item: dict[str, Any], rng: random.Random) -> list[dict[str, Any]]:
+    """その商品に対する3体の競争相手を作る。上限は各自の胸の内（非公開）。"""
+    rivals = []
+    for key in PERSONALITIES:
+        rivals.append({
+            "key": key,
+            "ceiling": compute_ai_ceiling(item, key, rng),
+            "folded": False,
+        })
+    return rivals
+
+
+def rivals_opening(rivals: list[dict[str, Any]], rng: random.Random) -> dict[str, Any]:
+    """競りの口火。各自が探りの額を出し、いちばん高い者が最初のリーダーになる。"""
+    offers = [(r["key"], ai_opening_bid(r["ceiling"], rng)) for r in rivals]
+    top_key, top_bid = max(offers, key=lambda kv: kv[1])
+    return {"offers": offers, "leader": top_key, "bid": top_bid}
+
+
+def rivals_respond(
+    item: dict[str, Any],
+    rivals: list[dict[str, Any]],
+    player_bid: int,
+    rng: random.Random,
+) -> dict[str, Any]:
+    """プレイヤーの入札に対する、降りていない相手全員の反応。
+
+    rivals の "folded" を直接更新する。
+
+    Returns:
+        {"actions": [(key, bid|None), ...],   # bid=None は降りた
+         "leader": key|None, "bid": int|None}  # 誰も乗らなければ leader=None
+    """
+    actions: list[tuple[str, int | None]] = []
+    for r in rivals:
+        if r["folded"]:
+            continue
+        resp = ai_response(item, r["key"], r["ceiling"], player_bid, rng)
+        if resp["fold"]:
+            r["folded"] = True
+            actions.append((r["key"], None))
+        else:
+            actions.append((r["key"], resp["bid"]))
+
+    live = [(k, b) for k, b in actions if b is not None]
+    if not live:
+        return {"actions": actions, "leader": None, "bid": None}
+    leader, bid = max(live, key=lambda kv: kv[1])
+    return {"actions": actions, "leader": leader, "bid": bid}
+
+
+def all_folded(rivals: list[dict[str, Any]]) -> bool:
+    return all(r["folded"] for r in rivals)
+
+
+# ---------------------------------------------------------------------------
 # 状態管理ヘルパー
 # ---------------------------------------------------------------------------
 
@@ -241,11 +309,10 @@ def _start_round(s: dict[str, Any]) -> None:
     """ラウンド固有の状態を初期化する（資金・累計利益などグローバルな値は触らない）。"""
     rng: random.Random = s["rng"]
     s["current_item"] = generate_item(rng)
-    s["current_personality"] = rng.choice(list(PERSONALITIES.keys()))
+    s["rivals"] = create_rivals(s["current_item"], rng)
     s["info_bought"] = {}
     s["info_cost_total"] = 0
     s["round_phase"] = "shop"
-    s["ai_ceiling"] = None
     s["current_bid"] = None
     s["leader"] = None
     s["bid_draft"] = None  # 入札開始時に _reset_bid_draft() が入れ直す
@@ -301,15 +368,20 @@ def adjust_bid_draft(s: dict[str, Any], delta: int) -> int:
     return s["bid_draft"]
 
 
+def _rival_label(key: str) -> str:
+    p = PERSONALITIES[key]
+    return f"{p['emoji']} {p['label']}"
+
+
 def _start_bidding(s: dict[str, Any]) -> None:
     rng: random.Random = s["rng"]
-    item = s["current_item"]
-    ceiling = compute_ai_ceiling(item, s["current_personality"], rng)
-    opening = ai_opening_bid(ceiling, rng)
-    s["ai_ceiling"] = ceiling
-    s["current_bid"] = opening
-    s["leader"] = "ai"
-    s["auction_log"] = [("🤖 AI", opening)]
+    opening = rivals_opening(s["rivals"], rng)
+
+    s["current_bid"] = opening["bid"]
+    s["leader"] = opening["leader"]
+    s["auction_log"] = [
+        (_rival_label(key), amount) for key, amount in opening["offers"]
+    ]
     s["bid_exchanges"] = 0
     s["round_phase"] = "bidding"
     _reset_bid_draft(s)
@@ -325,7 +397,12 @@ def _finalize_round(s: dict[str, Any], player_won: bool, price_paid: int) -> Non
         "round": s["round_num"],
         "item_name": item["name"],
         "category": item["category"],
-        "personality": s["current_personality"],
+        # プレイヤーが競り負けたときに、実際に競り落とした相手
+        "winner_rival": None if player_won else s.get("leader"),
+        "rivals": [
+            {"key": r["key"], "ceiling": r["ceiling"], "folded": r["folded"]}
+            for r in s["rivals"]
+        ],
         "won": player_won,
         "price_paid": price_paid,
         "true_value": item["true_value"],
@@ -344,21 +421,28 @@ def _process_player_bid(s: dict[str, Any], amount: int) -> None:
     s["bid_exchanges"] += 1
 
     if s["bid_exchanges"] > MAX_EXCHANGES:
-        # 押し合いが長引きすぎた。AIが根負けしてプレイヤーの勝ちとする。
+        # 押し合いが長引きすぎた。相手が根負けしてプレイヤーの勝ちとする。
         _finalize_round(s, True, amount)
         return
 
     rng: random.Random = s["rng"]
-    item = s["current_item"]
-    resp = ai_response(item, s["current_personality"], s["ai_ceiling"], amount, rng)
-    if resp["fold"]:
+    outcome = rivals_respond(s["current_item"], s["rivals"], amount, rng)
+
+    for key, bid in outcome["actions"]:
+        if bid is None:
+            s["auction_log"].append((_rival_label(key), "降りた"))
+        else:
+            s["auction_log"].append((_rival_label(key), bid))
+
+    if outcome["leader"] is None:
+        # 全員が降りた。プレイヤーの落札。
         _finalize_round(s, True, amount)
-    else:
-        s["auction_log"].append(("🤖 AI", resp["bid"]))
-        s["current_bid"] = resp["bid"]
-        s["leader"] = "ai"
-        # AIが上乗せしてきたので、次に必要な最低額まで入札額を引き上げ直す。
-        _reset_bid_draft(s)
+        return
+
+    s["current_bid"] = outcome["bid"]
+    s["leader"] = outcome["leader"]
+    # 相手が上乗せしてきたので、次に必要な最低額まで入札額を引き上げ直す。
+    _reset_bid_draft(s)
 
 
 def _process_pass(s: dict[str, Any]) -> None:
@@ -397,14 +481,31 @@ def render() -> None:
         _render_settled_phase(s)
 
 
+def _render_rivals(s: dict[str, Any], show_status: bool = False) -> None:
+    """卓に着いている3体。何を好むかが、どこまで積んでくるかの手がかりになる。"""
+    st.markdown("#### 🪑 今回の競争相手（3人とも同じ卓にいる）")
+    cols = st.columns(len(s["rivals"]))
+    item_category = s["current_item"]["category"]
+    for col, r in zip(cols, s["rivals"]):
+        p = PERSONALITIES[r["key"]]
+        likes_this = item_category in p["favorites"]
+        with col:
+            with st.container(border=True):
+                st.markdown(f"**{p['emoji']} {p['label']}**")
+                st.caption(p["desc"])
+                if likes_this:
+                    st.caption("👀 この手の品には目がないらしい。")
+                if show_status:
+                    st.caption("🏳️ 降りた" if r["folded"] else "🔥 まだ乗っている")
+
+
 def _render_shop_phase(s: dict[str, Any]) -> None:
     item = s["current_item"]
     cat = ITEM_CATEGORIES[item["category"]]
-    personality = PERSONALITIES[s["current_personality"]]
 
     st.subheader(f"商品 {s['round_num']}: {cat['emoji']} {item['name']}")
     st.caption(cat["flavor"])
-    st.write(f"今回の競争相手: {personality['emoji']} **{personality['label']}** ー {personality['desc']}")
+    _render_rivals(s)
 
     st.markdown("#### 🔎 情報を購入する（任意）")
     cols = st.columns(len(INFO_TYPES))
@@ -432,12 +533,24 @@ def _render_bidding_phase(s: dict[str, Any]) -> None:
     cat = ITEM_CATEGORIES[item["category"]]
 
     st.subheader(f"入札交渉中: {cat['emoji']} {item['name']}")
-    st.write(f"現在の最高額: **¥{s['current_bid']}**（現在のリーダー: 🤖 AI）")
+
+    leader = s["leader"]
+    leader_label = "🧑 あなた" if leader == "player" else _rival_label(leader)
+    remaining = [r for r in s["rivals"] if not r["folded"]]
+    st.write(
+        f"現在の最高額: **¥{s['current_bid']:,}**　/　リーダー: **{leader_label}**"
+        f"　/　まだ卓に残っている相手: **{len(remaining)}人**"
+    )
+    if remaining:
+        st.caption("残っている相手: " + "、".join(_rival_label(r["key"]) for r in remaining))
+    st.caption("全員が降りればあなたの落札です。")
+
+    _render_rivals(s, show_status=True)
 
     with st.expander("交渉ログ", expanded=True):
         for who, amt in s["auction_log"]:
             if isinstance(amt, int):
-                st.write(f"- {who}: ¥{amt}")
+                st.write(f"- {who}: ¥{amt:,}")
             else:
                 st.write(f"- {who}: {amt}")
 
@@ -485,21 +598,31 @@ def _render_bidding_phase(s: dict[str, Any]) -> None:
 def _render_settled_phase(s: dict[str, Any]) -> None:
     r = s["last_result"]
     cat = ITEM_CATEGORIES[r["category"]]
-    personality = PERSONALITIES[r["personality"]]
 
     st.subheader(f"結果: {cat['emoji']} {r['item_name']}")
     if r["won"]:
-        st.success(f"落札成功！ 支払額 ¥{r['price_paid']} ／ 真の価値は ¥{r['true_value']} だった。")
+        st.success(f"落札成功！ 支払額 ¥{r['price_paid']:,} ／ 真の価値は ¥{r['true_value']:,} だった。")
     else:
-        st.error(f"{personality['emoji']} {personality['label']}に競り負けた…（真の価値は ¥{r['true_value']} だった）")
+        winner = r.get("winner_rival")
+        who = _rival_label(winner) if winner else "競争相手"
+        st.error(f"{who}に競り負けた…（真の価値は ¥{r['true_value']:,} だった）")
 
     ui.metric_row(
         [
-            ("情報コスト", f"¥{r['info_cost']}"),
-            ("このラウンドの利益", f"¥{r['profit']}"),
-            ("累計利益", f"¥{s['money'] - START_MONEY}"),
+            ("情報コスト", f"¥{r['info_cost']:,}"),
+            ("このラウンドの利益", f"¥{r['profit']:,}"),
+            ("累計利益", f"¥{s['money'] - START_MONEY:,}"),
         ]
     )
+
+    # 手の内を最後に開示する。次のラウンドで誰をどこまで警戒すべきかの学習材料。
+    with st.expander("🃏 相手の手の内（決着後に開示）"):
+        for rv in r.get("rivals", []):
+            p = PERSONALITIES[rv["key"]]
+            st.write(
+                f"- {p['emoji']} **{p['label']}** … 出せる上限は ¥{rv['ceiling']:,} だった"
+                f"（{'降りた' if rv['folded'] else '最後まで残っていた'}）"
+            )
 
     st.divider()
     is_last = s["round_num"] >= s["total_rounds"]

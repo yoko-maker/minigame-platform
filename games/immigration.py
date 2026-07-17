@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import random
 import string
+import time
 from typing import Any
 
 import streamlit as st
@@ -38,6 +39,16 @@ NAME = "immigration"
 TOTAL_ARRIVALS = 5          # 審査する入国者の総数
 QUESTIONS_PER_ARRIVAL = 3   # 1人あたりの質問回数上限
 WIN_THRESHOLD = 3           # この人数以上正解すれば勝利
+
+# 1人あたりの持ち時間。時間内に判定できなければ「見逃し」＝不正解になる。
+# 後ろに列ができている審査ブースなので、迷い続けること自体が失点になる。
+TIME_LIMIT_SEC = 60.0
+TIME_WARN_SEC = 15.0        # ここを切ったら警告表示に変える
+
+# 時計は「審査画面を開いている間」だけ進める。1秒ごとに刻むので、これを超える
+# 空白はページを見ていなかった時間とみなして数えない（ホームへ戻っている間に
+# 時間切れになるのを防ぐ）。
+MAX_TICK_STEP = 2.0
 
 TOPICS = ["hobby", "family", "food", "yesterday", "childhood"]
 
@@ -152,11 +163,14 @@ RESPONSE_TEMPLATES: dict[str, dict[str, list[str]]] = {
 HOW_TO_PLAY = """
 - 入国審査官として、次々にやってくる入国者が **AI** か **人間** かを見抜きましょう。
 - 左側の「提出書類」（パスポート番号・指紋照合・顔写真照合など）に矛盾がないか確認します。
-- 中央下のボタンで質問を行うと（1人につき最大 **3回** ）、応答が会話ログに追記されます。応答の自然さ・違和感から推理してください。
+- 中央下のボタンで質問を行うと（1人につき最大 **{q}回** ）、応答が会話ログに追記されます。応答の自然さ・違和感から推理してください。
 - 質問のあと、「🤖 AIと判定」または「🧑 人間と判定」ボタンで判定します。判定すると正解が発表され、次の入国者に進めます。
+- **1人あたりの持ち時間は {t:.0f} 秒です。** 画面上部の残り時間がゼロになると
+  判定できないまま見逃したことになり、その入国者は不正解として数えられます。
+  後ろには列ができています。迷い続けること自体が失点です。
 - 全 **{total}人** を審査し、**{win}人以上正解** すれば審査官として合格（勝利）です。
-- 書類の矛盾やぎこちない受け答えは手がかりですが、確実な証拠ではありません。慎重に見極めましょう。
-""".format(total=TOTAL_ARRIVALS, win=WIN_THRESHOLD)
+- 書類の矛盾やぎこちない受け答えは手がかりですが、確実な証拠ではありません。慎重に、しかし手早く見極めましょう。
+""".format(total=TOTAL_ARRIVALS, win=WIN_THRESHOLD, q=QUESTIONS_PER_ARRIVAL, t=TIME_LIMIT_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +240,26 @@ def judge(arrival: dict[str, Any], guess_is_ai: bool) -> bool:
     return guess_is_ai == arrival["is_ai"]
 
 
+def tick_timer(s: dict[str, Any], now: float, max_step: float = MAX_TICK_STEP) -> float:
+    """経過時間ぶんだけ持ち時間を減らし、残り秒数を返す。
+
+    `now` を引数で受け取るので、実時間に依存せず単体で検証できる。
+
+    審査中（phase == "asking"）以外では減らさない。また 1 回に減らせる量を
+    max_step で頭打ちにしているため、画面を離れていた長い空白は加算されない。
+    1秒ごとに刻まれている限り実時間どおりに減り、離席中は実質止まる。
+    """
+    last = s.get("last_tick")
+    if last is None:
+        last = now
+    elapsed = min(max(0.0, now - last), max_step)
+    s["last_tick"] = now
+
+    if s.get("phase") == "asking" and not s.get("game_over"):
+        s["time_left"] = max(0.0, float(s.get("time_left", TIME_LIMIT_SEC)) - elapsed)
+    return float(s.get("time_left", TIME_LIMIT_SEC))
+
+
 # ---------------------------------------------------------------------------
 # state 初期化・遷移ヘルパー（st.session_state を扱う非純粋関数）
 # ---------------------------------------------------------------------------
@@ -240,14 +274,18 @@ def _default_state() -> dict[str, Any]:
         "questions_left": QUESTIONS_PER_ARRIVAL,
         "asked_topics": [],       # 既に質問したtopicのリスト
         "log": [],                # [(topic_label, answer), ...]
-        "last_result": None,      # (correct: bool, was_ai: bool) or None
+        # {"correct": bool, "was_ai": bool, "timeout": bool} or None
+        "last_result": None,
         "game_over": False,
         "phase": "asking",        # "asking" | "result"
+        "time_left": TIME_LIMIT_SEC,
+        "last_tick": None,        # 直近に時計を刻んだ時刻（未開始は None）
+        "timeouts": 0,            # 時間切れで見逃した人数
     }
 
 
 def _start_next_arrival(s: dict[str, Any]) -> None:
-    """次の入国者を生成して state にセットする。"""
+    """次の入国者を生成して state にセットする。持ち時間もここで巻き戻す。"""
     round_no = s["round_no"]
     rng = random.Random(s["seed"] * 1_000_003 + round_no * 97 + 1)
     s["current_arrival"] = generate_arrival(rng, round_no)
@@ -255,6 +293,8 @@ def _start_next_arrival(s: dict[str, Any]) -> None:
     s["asked_topics"] = []
     s["log"] = []
     s["phase"] = "asking"
+    s["time_left"] = TIME_LIMIT_SEC
+    s["last_tick"] = None
 
 
 def _ask(s: dict[str, Any], arrival: dict[str, Any], topic: str) -> None:
@@ -272,7 +312,19 @@ def _submit_guess(s: dict[str, Any], arrival: dict[str, Any], guess_is_ai: bool)
     s["arrivals_judged"] += 1
     if correct:
         s["score"] += 1
-    s["last_result"] = (correct, arrival["is_ai"])
+    s["last_result"] = {"correct": correct, "was_ai": arrival["is_ai"], "timeout": False}
+    s["phase"] = "result"
+
+
+def _timeout(s: dict[str, Any]) -> None:
+    """持ち時間切れ。判定できなかったので見逃し扱い（＝不正解）にする。"""
+    if s["phase"] != "asking":
+        return
+    arrival = s["current_arrival"]
+    s["arrivals_judged"] += 1
+    s["timeouts"] += 1
+    s["time_left"] = 0.0
+    s["last_result"] = {"correct": False, "was_ai": arrival["is_ai"], "timeout": True}
     s["phase"] = "result"
 
 
@@ -287,6 +339,32 @@ def _advance(s: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # 画面描画
 # ---------------------------------------------------------------------------
+
+def _timer_bar(s: dict[str, Any], left: float) -> None:
+    """残り時間のバー。仕様どおり画面の一番上に置く。"""
+    ratio = max(0.0, min(1.0, left / TIME_LIMIT_SEC))
+    if left <= 0:
+        st.error("⏱️ 時間切れ")
+    elif left <= TIME_WARN_SEC:
+        st.warning(f"⏱️ 残り **{left:.0f}** 秒 — 急いで判定を")
+    else:
+        st.caption(f"⏱️ 残り {left:.0f} 秒")
+    st.progress(ratio)
+
+
+@st.fragment(run_every="1s")
+def _render_timer_live(s: dict[str, Any]) -> None:
+    """審査中の残り時間を1秒ごとに更新する。
+
+    fragment なのでページ全体を再実行せずにここだけが刻む。時間切れになった
+    瞬間だけアプリ全体を再実行して、結果画面へ切り替える。
+    """
+    left = tick_timer(s, time.time())
+    _timer_bar(s, left)
+    if left <= 0 and s["phase"] == "asking":
+        _timeout(s)
+        st.rerun(scope="app")
+
 
 def _render_documents(arrival: dict[str, Any]) -> None:
     st.subheader("📄 提出書類")
@@ -315,7 +393,7 @@ def _render_actions(s: dict[str, Any], arrival: dict[str, Any]) -> None:
     st.subheader("🔎 尋問 / 判定")
 
     if s["phase"] == "asking":
-        st.caption(f"残り質問回数：{s['questions_left']} 回")
+        st.caption(f"残り質問回数：{s['questions_left']} 回　/　持ち時間内に判定すること")
         for topic in TOPICS:
             label = TOPIC_LABELS[topic]
             already_asked = topic in s["asked_topics"]
@@ -337,9 +415,14 @@ def _render_actions(s: dict[str, Any], arrival: dict[str, Any]) -> None:
                 _submit_guess(s, arrival, False)
                 st.rerun()
     else:
-        correct, was_ai = s["last_result"]
-        truth_label = "AI" if was_ai else "人間"
-        if correct:
+        r = s["last_result"]
+        truth_label = "AI" if r["was_ai"] else "人間"
+        if r["timeout"]:
+            st.error(
+                f"⏱️ 時間切れ。判定できないまま入国させてしまった。"
+                f"\n\nこの入国者の正体は **{truth_label}** でした。"
+            )
+        elif r["correct"]:
             st.success(f"正解！ この入国者の正体は **{truth_label}** でした。")
         else:
             st.error(f"不正解…。この入国者の正体は **{truth_label}** でした。")
@@ -353,7 +436,13 @@ def _render_game_over(s: dict[str, Any]) -> None:
     ui.metric_row([
         ("最終正解数", f"{s['score']} / {TOTAL_ARRIVALS}"),
         ("合格ライン", f"{WIN_THRESHOLD} 人以上"),
+        ("時間切れ", f"{s.get('timeouts', 0)} 人"),
     ])
+    if s.get("timeouts"):
+        st.caption(
+            f"⏱️ {s['timeouts']} 人は時間内に判定できず見逃しました。"
+            "書類の矛盾は一目で分かるものから当たると速く捌けます。"
+        )
     win = s["score"] >= WIN_THRESHOLD
     ui.result_banner(
         win,
@@ -381,7 +470,14 @@ def render() -> None:
         ("審査中", f"{s['round_no'] + 1} / {TOTAL_ARRIVALS} 人目"),
         ("正解数", f"{s['score']} / {s['arrivals_judged']}"),
         ("残り質問回数", s["questions_left"]),
+        ("残り時間", f"{s['time_left']:.0f} 秒"),
     ])
+
+    # 仕様どおり残り時間は画面の一番上に。審査中だけ実際に時計を進める。
+    if s["phase"] == "asking":
+        _render_timer_live(s)
+    else:
+        _timer_bar(s, float(s["time_left"]))
 
     st.divider()
 
