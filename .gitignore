@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# Claude Code の個人設定（.claude/settings.json はチーム共有のためコミットする）
+.claude/settings.local.json
+
+# エディタ / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Streamlit のローカル秘密情報
+.streamlit/secrets.toml
