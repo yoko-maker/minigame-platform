@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Callable
 
 import streamlit as st
@@ -95,6 +96,61 @@ def scroll_to_top() -> None:
             window.parent.scrollTo(0, 0);
           }} catch (e) {{
             /* 何らかの理由でDOMに触れなくても、表示自体は壊さない */
+          }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def bind_keys(mapping: dict[str, str]) -> None:
+    """キーボードのキーを、指定した key を持つボタンのクリックに割り当てる。
+
+    Args:
+        mapping: {KeyboardEvent.key: ボタンの key}。
+                 例: {"ArrowUp": "mus_move_up", "ArrowDown": "mus_move_down"}
+
+    Streamlit は key を持つウィジェットのラッパ要素に `st-key-<key>` という
+    クラスを付けるので、それを手がかりに本物のボタンを押す。ボタンを押すだけなので
+    通常のクリックと挙動は完全に同じになる（状態遷移を二重に実装しなくてよい）。
+
+    入力欄にフォーカスがあるときは何もしない（文字入力を奪わないため）。
+    再実行のたびに古いリスナを外してから付け直すので、多重登録は起きない。
+    """
+    js_map = json.dumps(mapping)
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          try {{
+            var doc = window.parent.document;
+            var map = {js_map};
+
+            if (window.parent.__stKeyHandler) {{
+              doc.removeEventListener('keydown', window.parent.__stKeyHandler, true);
+            }}
+
+            var handler = function (e) {{
+              if (e.ctrlKey || e.metaKey || e.altKey) return;
+              var tag = e.target && e.target.tagName;
+              var editing = e.target && e.target.isContentEditable;
+              if (editing || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+              var widgetKey = map[e.key];
+              if (!widgetKey) return;
+
+              var btn = doc.querySelector('.st-key-' + widgetKey + ' button');
+              if (btn && !btn.disabled) {{
+                e.preventDefault();
+                btn.click();
+              }}
+            }};
+
+            doc.addEventListener('keydown', handler, true);
+            window.parent.__stKeyHandler = handler;
+          }} catch (err) {{
+            /* キー操作が使えなくても、ボタンでは遊べるので表示は壊さない */
           }}
         }})();
         </script>

@@ -37,6 +37,53 @@ ALERT_MAX = 100
 TRAIT_CHARGES = 3
 HAZARD_DENSITY = 0.32
 
+# 難易度。盤面の広さ・障害物の多さ・持ち時間・特性とアイテムの余裕を一括で変える。
+# 広さと密度が変わると生成されるマップの表情も変わるので、選ぶだけで遊べる盤面が増える。
+DIFFICULTIES: dict[str, dict[str, Any]] = {
+    "novice": {
+        "label": "見習い",
+        "emoji": "🔰",
+        "size": 6,
+        "turns": 40,
+        "density": 0.20,
+        "charges": 4,
+        "items": {"emp": 3, "smoke": 3, "mirror": 3, "drone": 2},
+        "desc": "6×6の小さな館。障害物は少なく、道具にも余裕がある。まずはここから。",
+    },
+    "normal": {
+        "label": "一人前",
+        "emoji": "🎯",
+        "size": 7,
+        "turns": 32,
+        "density": 0.32,
+        "charges": 3,
+        "items": {"emp": 2, "smoke": 2, "mirror": 2, "drone": 1},
+        "desc": "7×7。障害物と道具が釣り合った標準の館。",
+    },
+    "hard": {
+        "label": "怪盗",
+        "emoji": "🔥",
+        "size": 8,
+        "turns": 34,
+        "density": 0.42,
+        "charges": 2,
+        "items": {"emp": 1, "smoke": 1, "mirror": 1, "drone": 1},
+        "desc": "8×8。警備が厚く道具も乏しい。通る道をよく選ぶこと。",
+    },
+    "master": {
+        "label": "伝説",
+        "emoji": "💀",
+        "size": 9,
+        "turns": 36,
+        "density": 0.46,
+        "charges": 2,
+        "items": {"emp": 1, "smoke": 1, "mirror": 0, "drone": 0},
+        "desc": "9×9。鏡もドローンも無い。館の記憶と勘だけが頼り。",
+    },
+}
+DIFFICULTY_ORDER = ["novice", "normal", "hard", "master"]
+DEFAULT_DIFFICULTY = "normal"
+
 CELL_EMPTY = "empty"
 CELL_LASER = "laser"
 CELL_CAMERA = "camera"
@@ -70,25 +117,25 @@ TRAITS: dict[str, dict[str, str]] = {
         "label": "ハッカー",
         "emoji": "💻",
         "counters": CELL_CAMERA,
-        "desc": "監視カメラの回線に侵入し、無力化しながら進む（3回まで）。",
+        "desc": "監視カメラの回線に侵入し、無力化しながら進む。",
     },
     "engineer": {
         "label": "エンジニア",
         "emoji": "🔧",
         "counters": CELL_LASER,
-        "desc": "センサーの配線を熟知し、レーザーを一時停止できる（3回まで）。",
+        "desc": "センサーの配線を熟知し、レーザーを一時停止できる。",
     },
     "thief": {
         "label": "怪盗",
         "emoji": "🥷",
         "counters": CELL_GUARD,
-        "desc": "足音を完全に消し、警備員の横をすり抜ける（3回まで）。",
+        "desc": "足音を完全に消し、警備員の横をすり抜ける。",
     },
     "illusionist": {
         "label": "幻術師",
         "emoji": "🎭",
         "counters": CELL_GUARD,
-        "desc": "幻影で気を引き、警備員を別方向へ誘導する（3回まで）。",
+        "desc": "幻影で気を引き、警備員を別方向へ誘導する。",
     },
 }
 TRAIT_ORDER = ["hacker", "engineer", "thief", "illusionist"]
@@ -107,16 +154,19 @@ HOW_TO_PLAY = """
 **目的**: 博物館に忍び込み、💎宝石を手に入れて🚪出口から脱出しよう。
 
 **進め方**
-1. 得意な特性を1つ選ぶ（対応する障害物を数回まで無効化できる）。
-2. ⬆️⬇️⬅️➡️ ボタンでマップを移動する（1手ごとにターンを消費）。
-3. 💎宝石のマスに入ると自動的に回収する。
-4. 宝石を持って🚪出口のマスに入れば脱出成功（勝利）。
+1. 潜入する館（難易度）を選ぶ。広さ・警備の厚さ・持ち時間・道具の数が変わる。
+   「🎲 別の館にする」で同じ難易度のまま別の間取りを引き直せる。
+2. 得意な特性を1つ選ぶ（対応する障害物を数回まで無効化できる）。
+3. **キーボードの十字キー（← ↑ ↓ →）** か ⬆️⬇️⬅️➡️ ボタンで移動する
+   （1手ごとにターンを消費）。
+4. 💎宝石のマスに入ると自動的に回収する。
+5. 宝石を持って🚪出口のマスに入れば脱出成功（勝利）。
 
 **障害物**
 - 🔴レーザー・📷監視カメラに無防備で踏み込むと警戒度が上昇する。警戒度が100%になると失敗。
 - 💂警備員に無防備で踏み込むと、その場で見つかり即座に失敗になる。
 
-**特性（開始時に1つ選択、対応する障害物を3回まで無効化）**
+**特性（開始時に1つ選択。対応する障害物を無効化できる。回数は難易度による）**
 - 💻ハッカー: 監視カメラを無効化
 - 🔧エンジニア: レーザーを停止
 - 🥷怪盗: 足音を消して警備員をやり過ごす
@@ -159,8 +209,14 @@ def reachable_cells(size: int, start: tuple[int, int]) -> set[tuple[int, int]]:
     return visited
 
 
-def generate_map(rng: random.Random, size: int) -> dict[str, Any]:
+def generate_map(
+    rng: random.Random, size: int, hazard_density: float = HAZARD_DENSITY
+) -> dict[str, Any]:
     """ランダムなマップを1つ生成して返す。
+
+    Args:
+        size: 盤面の一辺のマス数。
+        hazard_density: 1マスが障害物になる確率。難易度で変わる。
 
     戻り値: {"size", "grid", "start", "gem", "exit"}
     grid[r][c] は CELL_* のいずれか。start/gem/exit は必ず到達可能。
@@ -202,7 +258,7 @@ def generate_map(rng: random.Random, size: int) -> dict[str, Any]:
             for c in range(size):
                 if (r, c) in reserved:
                     continue
-                if rng.random() < HAZARD_DENSITY:
+                if rng.random() < hazard_density:
                     grid[r][c] = rng.choice(hazard_types)
 
         reachable = reachable_cells(size, start)
@@ -216,9 +272,11 @@ def generate_map(rng: random.Random, size: int) -> dict[str, Any]:
 def _default_state() -> dict[str, Any]:
     return {
         "phase": "trait_select",  # trait_select -> playing -> ended
+        "difficulty": DEFAULT_DIFFICULTY,
         "trait": None,
         "trait_charges": 0,
         "items": dict(ITEM_START_COUNTS),
+        "max_turns": MAX_TURNS,
         "rng_seed": random.randrange(1_000_000_000),
         "map": None,
         "pos": None,
@@ -243,15 +301,31 @@ def _reveal_around(gs: dict[str, Any], pos: tuple[int, int]) -> None:
                 gs["revealed"].add((nr, nc))
 
 
+def set_difficulty(gs: dict[str, Any], key: str) -> None:
+    """潜入前に難易度を選ぶ。開始後は変えられない。"""
+    if gs["phase"] == "trait_select" and key in DIFFICULTIES:
+        gs["difficulty"] = key
+
+
+def reroll_map(gs: dict[str, Any]) -> None:
+    """同じ難易度のまま、別の館（別のマップ）を引き直す。"""
+    if gs["phase"] == "trait_select":
+        gs["rng_seed"] = random.randrange(1_000_000_000)
+
+
 def select_trait(gs: dict[str, Any], trait_key: str) -> None:
-    """特性を確定し、マップを生成してプレイ開始状態にする。"""
+    """特性を確定し、選んだ難易度でマップを生成してプレイ開始状態にする。"""
     if gs["phase"] != "trait_select" or trait_key not in TRAITS:
         return
+    diff = DIFFICULTIES[gs.get("difficulty", DEFAULT_DIFFICULTY)]
+
     gs["trait"] = trait_key
-    gs["trait_charges"] = TRAIT_CHARGES
+    gs["trait_charges"] = diff["charges"]
+    gs["items"] = dict(diff["items"])
+    gs["max_turns"] = diff["turns"]
 
     rng = random.Random(gs["rng_seed"])
-    gmap = generate_map(rng, GRID_SIZE)
+    gmap = generate_map(rng, diff["size"], diff["density"])
     gs["map"] = gmap
     gs["pos"] = gmap["start"]
     gs["has_gem"] = False
@@ -388,7 +462,7 @@ def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
             gs["phase"] = "ended"
             gs["win"] = False
             gs["end_reason"] = "警戒度が限界に達し、警備員に包囲された。"
-        elif gs["turns_used"] >= MAX_TURNS:
+        elif gs["turns_used"] >= gs.get("max_turns", MAX_TURNS):
             gs["phase"] = "ended"
             gs["win"] = False
             gs["end_reason"] = "閉館時刻になり、脱出できなかった。"
@@ -402,8 +476,41 @@ def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
 
 
 def _render_trait_select(gs: dict[str, Any]) -> None:
-    st.subheader("潜入前の準備：特性を1つ選んでください")
-    st.caption(f"マップシード: {gs['rng_seed']}（リセットすると新しいマップになる）")
+    current = gs.get("difficulty", DEFAULT_DIFFICULTY)
+
+    st.subheader("① 潜入する館を選ぶ")
+    chosen = st.radio(
+        "難易度",
+        options=DIFFICULTY_ORDER,
+        index=DIFFICULTY_ORDER.index(current),
+        format_func=lambda k: f"{DIFFICULTIES[k]['emoji']} {DIFFICULTIES[k]['label']}",
+        horizontal=True,
+        key="mus_difficulty",
+    )
+    if chosen != current:
+        set_difficulty(gs, chosen)
+        st.rerun()
+
+    diff = DIFFICULTIES[current]
+    st.caption(diff["desc"])
+    ui.metric_row(
+        [
+            ("広さ", f"{diff['size']}×{diff['size']}"),
+            ("持ち時間", f"{diff['turns']}手"),
+            ("特性の使用回数", f"{diff['charges']}回"),
+            ("道具の総数", sum(diff["items"].values())),
+        ]
+    )
+
+    seed_col, _ = st.columns([1, 2])
+    with seed_col:
+        if st.button("🎲 別の館にする", key="mus_reroll", use_container_width=True):
+            reroll_map(gs)
+            st.rerun()
+    st.caption(f"館の見取り図: #{gs['rng_seed']}　同じ番号なら同じ間取りになる。")
+
+    st.divider()
+    st.subheader("② 特性を1つ選ぶ（選ぶと潜入開始）")
 
     cols = st.columns(4)
     for col, key in zip(cols, TRAIT_ORDER):
@@ -412,7 +519,8 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
             with st.container(border=True):
                 st.markdown(f"### {info['emoji']} {info['label']}")
                 st.write(info["desc"])
-                if st.button("この特性を選ぶ", key=f"mus_trait_{key}", use_container_width=True):
+                st.caption(f"この難易度では {diff['charges']} 回まで使える。")
+                if st.button("この特性で潜入する", key=f"mus_trait_{key}", use_container_width=True):
                     select_trait(gs, key)
                     st.rerun()
 
@@ -445,24 +553,29 @@ def _render_grid(gs: dict[str, Any]) -> None:
 
 def _render_playing(gs: dict[str, Any]) -> None:
     trait_info = TRAITS[gs["trait"]]
+    diff = DIFFICULTIES[gs.get("difficulty", DEFAULT_DIFFICULTY)]
+    max_turns = gs.get("max_turns", MAX_TURNS)
 
     ui.metric_row(
         [
-            ("警戒度", f"{gs['alert']}%"),
-            ("ターン", f"{gs['turns_used']}/{MAX_TURNS}"),
+            ("難易度", f"{diff['emoji']} {diff['label']}"),
+            ("警戒度", f"{gs['alert']}% / {ALERT_MAX}%"),
+            ("ターン", f"{gs['turns_used']}/{max_turns}"),
             ("宝石", "💎所持" if gs["has_gem"] else "未回収"),
             (f"{trait_info['emoji']} {trait_info['label']} 残り", gs["trait_charges"]),
         ]
     )
-    st.progress(min(1.0, gs["alert"] / ALERT_MAX), text="警戒度メーター")
+    st.progress(min(1.0, gs["alert"] / ALERT_MAX), text="警戒度メーター（100%で包囲される）")
 
     st.write("")
     _render_grid(gs)
     st.caption(f"{PLAYER_ICON} あなた　・通路　🔴レーザー　📷カメラ　💂警備員　💎宝石　🚪出口　{FOG_ICON}未偵察")
 
     st.write("#### 移動")
-    top = st.columns([1, 1, 1])
-    with top[1]:
+    st.caption("⌨️ キーボードの十字キー（← ↑ ↓ →）でも移動できます。")
+
+    move_cols = st.columns([1, 1, 1])
+    with move_cols[1]:
         if st.button("⬆️", key="mus_move_up", use_container_width=True):
             try_move(gs, "up")
             st.rerun()
@@ -480,6 +593,16 @@ def _render_playing(gs: dict[str, Any]) -> None:
         if st.button("⬇️", key="mus_move_down", use_container_width=True):
             try_move(gs, "down")
             st.rerun()
+
+    # 十字キーを上の移動ボタンに割り当てる（ボタンを押すのと同じ経路を通る）。
+    ui.bind_keys(
+        {
+            "ArrowUp": "mus_move_up",
+            "ArrowDown": "mus_move_down",
+            "ArrowLeft": "mus_move_left",
+            "ArrowRight": "mus_move_right",
+        }
+    )
 
     st.write("#### 所持アイテム")
     item_cols = st.columns(4)

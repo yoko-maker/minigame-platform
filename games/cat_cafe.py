@@ -45,6 +45,11 @@ CAT_CARE_COST = 300  # 猫の餌代などの固定費
 
 BANKRUPTCY_LIMIT = -4000  # これを下回ると経営破綻でゲームオーバー
 
+# 猫のコンディションの目盛り。UI で「いくつまであるのか」を必ず示すために使う。
+CAT_STAT_MAX = 100
+CAT_MOOD_GOOD = 70      # これ以上なら機嫌が良いと言える
+CAT_FATIGUE_WARN = 75   # これを超えると機嫌が下がり始める（simulate_day と対応）
+
 AD_COSTS = [0, 700, 1600, 3000]
 AD_LABELS = ["投資しない", "軽め", "普通", "積極的"]
 
@@ -102,7 +107,14 @@ HOW_TO_PLAY = f"""
 
 1. 毎朝、**価格・広告投資・設備投資・猫を休ませるか** を決めます。
 2. 「営業開始」を押すと、その日の来客数・売上・コスト・利益と、ランダムイベントの結果が表示されます。
-3. 「次の日へ」で翌日に進みます。これを{TOTAL_DAYS}日間繰り返します。
+3. 結果画面には **🗣️ 入場者の声** が出ます。値段・広告・設備・猫の様子への反応なので、
+   不満が出た点を翌日の方針で直していくと評価が伸びます。
+4. 「次の日へ」で翌日に進みます。これを{TOTAL_DAYS}日間繰り返します。
+
+**猫のコンディションはすべて 0〜{CAT_STAT_MAX} の目盛りです**
+- 😺 機嫌: 高いほど良い（{CAT_MOOD_GOOD}以上を保ちたい）
+- 😪 疲労: 低いほど良い（{CAT_FATIGUE_WARN}を超えると機嫌が下がり始める）
+- ⭐ 人気: 高いほど客が増える
 
 **客層によって反応が違います**
 - 🎒 学生: 価格にとても敏感
@@ -207,7 +219,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         new_fatigue = _clamp(cat["fatigue"] + fatigue_gain, 0, 100)
 
         mood_shift = 0.0
-        if new_fatigue > 75:
+        if new_fatigue > CAT_FATIGUE_WARN:
             mood_shift -= 8
         elif new_fatigue < 30:
             mood_shift += 4
@@ -215,7 +227,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         new_mood = _clamp(cat["mood"] + mood_shift, 0, 100)
 
         popularity_shift = -1.0 + event["popularity_delta"]
-        if new_mood >= 70 and new_fatigue <= 60:
+        if new_mood >= CAT_MOOD_GOOD and new_fatigue <= 60:
             popularity_shift += 2
         new_popularity = _clamp(cat["popularity"] + popularity_shift, 0, 100)
 
@@ -238,8 +250,9 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
 
     bankrupt = new_funds <= BANKRUPTCY_LIMIT
 
-    return {
+    result: dict[str, Any] = {
         "event": event,
+        "settings": dict(settings),
         "segment_visitors": segment_visitors,
         "total_visitors": total_visitors,
         "revenue": revenue,
@@ -266,6 +279,148 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
             "facility_level": new_facility_level,
         },
     }
+    # 客の声はその日の結果から導くので、結果が揃ってから最後に組み立てる。
+    result["voices"] = customer_voices(result, rng)
+    return result
+
+
+def customer_voices(
+    result: dict[str, Any], rng: random.Random, limit: int = 3
+) -> list[dict[str, str]]:
+    """その日の来客から拾った声を返す純粋関数。
+
+    翌日の方針決定の手がかりになるよう、実際にその日の数値を悪く（または良く）
+    した原因だけを取り上げる。強い不満から順に拾うので、声を潰していけば経営が
+    良くなる。客の言葉として書き、システムの助言口調にはしない。
+
+    Returns:
+        [{"who": 客層ラベル, "text": 発言, "tone": "bad"|"good"|"info"}, ...]
+    """
+    settings = result["settings"]
+    cat = result["cat_after"]
+    event = result["event"]
+    price = settings["price"]
+    ad_level = settings["ad_level"]
+    facility = result["gamestate"]["facility_level"]
+    visitors = result["total_visitors"]
+
+    # (優先度, 声) の候補。優先度が高いほど「今いちばん効いている原因」。
+    candidates: list[tuple[float, dict[str, str]]] = []
+
+    over = (price - PRICE_REF) / PRICE_REF  # 基準価格からの乖離
+    if over > 0.35:
+        candidates.append((10 + over, {
+            "who": "🎒 学生",
+            "text": f"{price:,}円はさすがに厳しいです……。友達を誘いづらくて。",
+            "tone": "bad",
+        }))
+    elif over > 0.15:
+        candidates.append((6 + over, {
+            "who": "👪 家族",
+            "text": f"{price:,}円だと、家族全員で来るのは少し考えちゃいますね。",
+            "tone": "bad",
+        }))
+    elif over < -0.25:
+        candidates.append((5, {
+            "who": "💼 会社員",
+            "text": f"{price:,}円は正直、安すぎませんか。もう少し取っていいと思いますよ。",
+            "tone": "info",
+        }))
+    else:
+        candidates.append((3, {
+            "who": "💼 会社員",
+            "text": f"{price:,}円でこの時間が過ごせるなら、また寄ります。",
+            "tone": "good",
+        }))
+
+    if cat["fatigue"] > CAT_FATIGUE_WARN:
+        candidates.append((12, {
+            "who": "👪 家族",
+            "text": "猫ちゃん、ぐったりしてました……。無理させてないといいんですけど。",
+            "tone": "bad",
+        }))
+    elif cat["fatigue"] < 30 and cat["mood"] >= CAT_MOOD_GOOD:
+        candidates.append((4, {
+            "who": "🧳 観光客",
+            "text": "猫がのびのびしてて、見てるだけで癒されました！",
+            "tone": "good",
+        }))
+
+    if cat["mood"] < 40:
+        candidates.append((11, {
+            "who": "🎒 学生",
+            "text": "猫が全然こっち来てくれなくて……。機嫌が悪かったのかな。",
+            "tone": "bad",
+        }))
+    elif cat["mood"] >= 85:
+        candidates.append((4, {
+            "who": "👪 家族",
+            "text": "膝の上で寝てくれました。子どもが大喜びでしたよ。",
+            "tone": "good",
+        }))
+
+    if facility == 0:
+        candidates.append((8, {
+            "who": "💼 会社員",
+            "text": "席が硬くて、長居はしづらいですね。設備がもう少し良ければ。",
+            "tone": "bad",
+        }))
+    elif facility >= 2:
+        candidates.append((3, {
+            "who": "🧳 観光客",
+            "text": "内装が素敵で、写真をたくさん撮ってしまいました。",
+            "tone": "good",
+        }))
+
+    if ad_level == 0:
+        candidates.append((7, {
+            "who": "🧳 観光客",
+            "text": "こんなお店があるの、知りませんでした。たまたま通りかかって。",
+            "tone": "bad",
+        }))
+    elif ad_level >= 2:
+        candidates.append((3, {
+            "who": "🎒 学生",
+            "text": "広告を見て来ました！ずっと気になってたんです。",
+            "tone": "good",
+        }))
+
+    if settings["rest_cat"]:
+        candidates.append((9, {
+            "who": "👪 家族",
+            "text": "今日は早じまいだったんですね。せっかく来たのに残念でした。",
+            "tone": "info",
+        }))
+
+    if event["id"] == "escape":
+        candidates.append((9, {
+            "who": "🎒 学生",
+            "text": "猫が逃げ出して大騒ぎでしたね。無事に見つかってよかったです。",
+            "tone": "info",
+        }))
+    elif event["id"] == "rain":
+        candidates.append((5, {
+            "who": "💼 会社員",
+            "text": "雨宿りのつもりで入りましたが、思ったより落ち着けました。",
+            "tone": "info",
+        }))
+    elif event["id"] in ("tv", "sns"):
+        candidates.append((6, {
+            "who": "🧳 観光客",
+            "text": "話題になってたので来ました！混んでたけど満足です。",
+            "tone": "good",
+        }))
+
+    if visitors == 0:
+        return [{
+            "who": "🌙 店主",
+            "text": "今日は誰も来なかった。値段か、広告か、猫の様子か——どこかに理由がある。",
+            "tone": "bad",
+        }]
+
+    # 強い声から順に。優先度が並んだときの順序を乱数で散らして、毎日同じ並びにしない。
+    candidates.sort(key=lambda c: (-c[0], rng.random()))
+    return [voice for _prio, voice in candidates[:limit]]
 
 
 def final_evaluation(gamestate: dict[str, Any]) -> dict[str, Any]:
@@ -331,6 +486,24 @@ def render() -> None:
         _render_gameover(s)
 
 
+def _render_cat_condition(cat: dict[str, int]) -> None:
+    """猫の状態を「いくつまであるのか」「どちらへ動かしたいのか」が分かる形で出す。
+
+    数字だけだと 70 が高いのか低いのかが読めないので、上限とバーを必ず添える。
+    """
+    st.markdown("**🐈 猫のコンディション**")
+    rows = [
+        ("😺 機嫌", cat["mood"], f"高いほど客が喜び、チップも増える（{CAT_MOOD_GOOD}以上を保ちたい）"),
+        ("😪 疲労", cat["fatigue"], f"低いほど良い。{CAT_FATIGUE_WARN}を超えると機嫌が下がり始める"),
+        ("⭐ 人気", cat["popularity"], "高いほど客が増える。機嫌が良く疲れていない日が続くと伸びる"),
+    ]
+    for label, value, note in rows:
+        st.progress(
+            _clamp(value, 0, 100) / 100,
+            text=f"{label}　{value} / {CAT_STAT_MAX}　— {note}",
+        )
+
+
 def _render_plan(s: dict[str, Any]) -> None:
     st.subheader(f"📅 {s['day']}日目 / {TOTAL_DAYS}日 - 方針決定")
 
@@ -338,13 +511,15 @@ def _render_plan(s: dict[str, Any]) -> None:
     ui.metric_row([
         ("資金", f"¥{int(s['funds']):,}"),
         ("評価スコア", f"{s['reputation']:.0f} / 100"),
-        ("猫の機嫌", f"{cat['mood']}"),
-        ("猫の疲労", f"{cat['fatigue']}"),
-        ("猫の人気", f"{cat['popularity']}"),
+        ("合格ライン", f"{WIN_SCORE_THRESHOLD:.0f}"),
     ])
+    _render_cat_condition(cat)
 
-    if cat["fatigue"] >= 75:
-        st.warning("😿 猫がかなり疲れています。休ませることを検討しましょう。")
+    if cat["fatigue"] > CAT_FATIGUE_WARN:
+        st.warning(
+            f"😿 疲労が {cat['fatigue']} / {CAT_STAT_MAX} です。"
+            f"{CAT_FATIGUE_WARN} を超えると機嫌が下がり始めます。休ませることを検討しましょう。"
+        )
     if s["funds"] < 0:
         st.warning(f"⚠️ 資金がマイナスです。{BANKRUPTCY_LIMIT:,} 円を下回ると経営破綻します。")
 
@@ -415,6 +590,33 @@ def _render_plan(s: dict[str, Any]) -> None:
         st.rerun()
 
 
+VOICE_TONE_STYLE = {
+    "bad": ("#F2A0A0", "😕"),
+    "good": ("#9CBF9A", "😊"),
+    "info": ("#E0C58F", "💬"),
+}
+
+
+def _render_voices(voices: list[dict[str, str]]) -> None:
+    """入場者の声。翌日の方針を決めるための一次情報として出す。"""
+    if not voices:
+        return
+    st.markdown("**🗣️ 今日の入場者の声**")
+    st.caption("その日の値段・広告・設備・猫の様子への反応です。明日の方針の手がかりに。")
+    for v in voices:
+        color, mark = VOICE_TONE_STYLE.get(v["tone"], VOICE_TONE_STYLE["info"])
+        st.markdown(
+            f"""
+            <div style="border-left:3px solid {color};padding:.35rem 0 .35rem .7rem;
+                        margin:.35rem 0;">
+              <div style="font-size:.78rem;opacity:.75;">{mark} {v["who"]}</div>
+              <div>{v["text"]}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def _render_result(s: dict[str, Any]) -> None:
     result = s["pending_result"]
     st.subheader(f"📊 {s['day']}日目 - 営業結果")
@@ -438,9 +640,12 @@ def _render_result(s: dict[str, Any]) -> None:
         for seg in SEGMENTS:
             st.write(f"{seg['label']}: {result['segment_visitors'][seg['key']]}人")
 
+    _render_voices(result.get("voices", []))
+
     cat_before, cat_after = result["cat_before"], result["cat_after"]
     st.markdown("**猫のコンディション変化**")
     _cat_delta_row(cat_before, cat_after)
+    _render_cat_condition(cat_after)
 
     st.markdown(
         f"**評価スコア**: {result['gamestate']['reputation']:.1f} / 100 "

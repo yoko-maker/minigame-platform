@@ -248,6 +248,7 @@ def _start_round(s: dict[str, Any]) -> None:
     s["ai_ceiling"] = None
     s["current_bid"] = None
     s["leader"] = None
+    s["bid_draft"] = None  # 入札開始時に _reset_bid_draft() が入れ直す
     s["bid_exchanges"] = 0
     s["auction_log"] = []
     s["last_result"] = None
@@ -279,6 +280,27 @@ def _buy_info(s: dict[str, Any], key: str) -> None:
     s["info_bought"][key] = est
 
 
+def min_bid(s: dict[str, Any]) -> int:
+    """AIの提示額を上回るのに必要な最低額。"""
+    return int(s["current_bid"]) + 1
+
+
+def clamp_bid(s: dict[str, Any], amount: int) -> int:
+    """入札額を「最低額以上・手持ち以下」に収める。"""
+    return max(min_bid(s), min(int(s["money"]), int(amount)))
+
+
+def _reset_bid_draft(s: dict[str, Any]) -> None:
+    """入札額の初期値を最低額に置く。ここから増減ボタンで積み上げる。"""
+    s["bid_draft"] = clamp_bid(s, min_bid(s))
+
+
+def adjust_bid_draft(s: dict[str, Any], delta: int) -> int:
+    """入札額を delta だけ増減して返す（範囲外にはならない）。"""
+    s["bid_draft"] = clamp_bid(s, s.get("bid_draft", min_bid(s)) + delta)
+    return s["bid_draft"]
+
+
 def _start_bidding(s: dict[str, Any]) -> None:
     rng: random.Random = s["rng"]
     item = s["current_item"]
@@ -290,6 +312,7 @@ def _start_bidding(s: dict[str, Any]) -> None:
     s["auction_log"] = [("🤖 AI", opening)]
     s["bid_exchanges"] = 0
     s["round_phase"] = "bidding"
+    _reset_bid_draft(s)
 
 
 def _finalize_round(s: dict[str, Any], player_won: bool, price_paid: int) -> None:
@@ -334,6 +357,8 @@ def _process_player_bid(s: dict[str, Any], amount: int) -> None:
         s["auction_log"].append(("🤖 AI", resp["bid"]))
         s["current_bid"] = resp["bid"]
         s["leader"] = "ai"
+        # AIが上乗せしてきたので、次に必要な最低額まで入札額を引き上げ直す。
+        _reset_bid_draft(s)
 
 
 def _process_pass(s: dict[str, Any]) -> None:
@@ -417,21 +442,39 @@ def _render_bidding_phase(s: dict[str, Any]) -> None:
                 st.write(f"- {who}: {amt}")
 
     money = s["money"]
-    min_bid = s["current_bid"] + 1
-    if min_bid > money:
+    lowest = min_bid(s)
+    if lowest > money:
         st.warning("資金不足でこれ以上の入札はできません。ここで諦めるしかなさそうだ。")
     else:
-        default_bid = min(min_bid + 10, money)
-        bid_amount = st.number_input(
-            "入札額",
-            min_value=int(min_bid),
-            max_value=int(money),
-            value=int(default_bid),
-            step=1,
-            key="bm_bid_amount",
+        draft = clamp_bid(s, s.get("bid_draft", lowest))
+        s["bid_draft"] = draft
+
+        st.markdown("#### 入札額")
+        st.markdown(
+            f"<div style='font-size:2.4rem;font-weight:800;line-height:1.1;'>¥{draft:,}</div>",
+            unsafe_allow_html=True,
         )
-        if st.button("💰 この金額で入札する", key="bm_place_bid", use_container_width=True):
-            _process_player_bid(s, int(bid_amount))
+        st.caption(f"最低 ¥{lowest:,} 〜 手持ち ¥{money:,}")
+
+        # 増減ボタン。上限・下限に達したものは押せなくする。
+        step_cols = st.columns(4)
+        for col, delta in zip(step_cols, (-10, -1, 1, 10)):
+            with col:
+                label = f"{delta:+d}"
+                blocked = clamp_bid(s, draft + delta) == draft
+                if st.button(
+                    label,
+                    key=f"bm_bid_step_{delta}",
+                    use_container_width=True,
+                    disabled=blocked,
+                ):
+                    adjust_bid_draft(s, delta)
+                    st.rerun()
+
+        if st.button(
+            f"💰 ¥{draft:,} で入札する", key="bm_place_bid", type="primary", use_container_width=True
+        ):
+            _process_player_bid(s, int(draft))
             st.rerun()
 
     if st.button("🏳️ 諦める（パス）", key="bm_pass", use_container_width=True):
