@@ -651,6 +651,25 @@ def _render_rivals(s: dict[str, Any], show_status: bool = False) -> None:
                     st.caption("🏳️ 降りた" if r["folded"] else "🔥 まだ乗っている")
 
 
+def _render_bought_info(s: dict[str, Any]) -> None:
+    """この商品で購入済みの情報（推定価値）を一覧表示する。
+
+    入札中は記憶頼みになりがちなので、買った手がかりをいつでも見返せるようにする。
+    表示順は情報の並び（噂→簡易鑑定→市場価格）に合わせる。
+    """
+    bought = s["info_bought"]
+    if not bought:
+        return
+    st.markdown("#### 🔎 購入済みの情報")
+    for key, info in INFO_TYPES.items():
+        est = bought.get(key)
+        if est:
+            st.write(
+                f"- **{info['label']}**（信頼度: {est['confidence']}）: "
+                f"推定価値 約 **¥{est['estimate']:,}**"
+            )
+
+
 def _render_shop_phase(s: dict[str, Any]) -> None:
     item = s["current_item"]
     cat = ITEM_CATEGORIES[item["category"]]
@@ -687,6 +706,9 @@ def _render_bidding_phase(s: dict[str, Any]) -> None:
     cat = ITEM_CATEGORIES[item["category"]]
 
     st.subheader(f"入札交渉中: {cat['emoji']} {item['name']}")
+
+    # 購入済みの情報（推定価値）をいつでも見返せるようにする。
+    _render_bought_info(s)
 
     leader = s["leader"]
     leader_label = "🧑 あなた" if leader == "player" else _rival_label(leader)
