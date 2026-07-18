@@ -31,6 +31,13 @@ GAME_META = {gid: (title, desc, icon) for gid, title, desc, icon in GAMES}
 # 内部用の session_state キー
 _SCROLL_KEY = "_scroll_to_top"
 _STARTED_KEY = "_started_games"
+_DIFFICULTY_KEY = "_difficulties"
+
+# 難易度の段階。4ゲーム共通の目盛りにしておき、各ゲームは
+# モジュール定数 DIFFICULTIES に、この4キーぶんの「呼び名」と「効き方」を書く。
+# 呼び名はゲームごとに変えてよい（審査官の「新人」と怪盗の「見習い」は別物）。
+LEVELS = ["easy", "normal", "hard", "expert"]
+DEFAULT_LEVEL = "normal"
 
 
 def init_state() -> None:
@@ -102,6 +109,26 @@ def is_started(name: str) -> bool:
 def mark_started(name: str) -> None:
     """遊び方画面のスタートボタンから呼ぶ。"""
     started_games().add(name)
+
+
+# ---------------------------------------------------------------------------
+# 難易度: 遊び方画面で選び、ゲーム本体は開始時に読むだけ。
+#
+# ゲーム専用の状態 dict とは別に持つ。リセットしても選んだ難易度は残るので、
+# 同じ難易度で何度も挑戦するときに選び直さずに済む。
+# ---------------------------------------------------------------------------
+
+def difficulty(name: str) -> str:
+    """そのゲームで選ばれている難易度キー。未選択なら DEFAULT_LEVEL。"""
+    return st.session_state.get(_DIFFICULTY_KEY, {}).get(name, DEFAULT_LEVEL)
+
+
+def set_difficulty(name: str, level: str) -> None:
+    if level not in LEVELS:
+        return
+    if _DIFFICULTY_KEY not in st.session_state:
+        st.session_state[_DIFFICULTY_KEY] = {}
+    st.session_state[_DIFFICULTY_KEY][name] = level
 
 
 # ---------------------------------------------------------------------------

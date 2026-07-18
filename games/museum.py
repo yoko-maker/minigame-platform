@@ -40,15 +40,16 @@ HAZARD_DENSITY = 0.32
 # 難易度。盤面の広さ・障害物の多さ・持ち時間・特性とアイテムの余裕を一括で変える。
 # 広さと密度が変わると生成されるマップの表情も変わるので、選ぶだけで遊べる盤面が増える。
 DIFFICULTIES: dict[str, dict[str, Any]] = {
-    "novice": {
+    "easy": {
         "label": "見習い",
         "emoji": "🔰",
         "size": 6,
         "turns": 40,
         "density": 0.20,
         "charges": 4,
+        "patrols": 0,
         "items": {"emp": 3, "smoke": 3, "mirror": 3, "drone": 2},
-        "desc": "6×6の小さな館。障害物は少なく、道具にも余裕がある。まずはここから。",
+        "desc": "6×6の小さな館。警備員は持ち場を動かず、道具にも余裕がある。まずはここから。",
     },
     "normal": {
         "label": "一人前",
@@ -57,8 +58,9 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "turns": 32,
         "density": 0.32,
         "charges": 3,
+        "patrols": 1,
         "items": {"emp": 2, "smoke": 2, "mirror": 2, "drone": 1},
-        "desc": "7×7。障害物と道具が釣り合った標準の館。",
+        "desc": "7×7。巡回する警備員が1人。持ち場を離れて動き回る。",
     },
     "hard": {
         "label": "怪盗",
@@ -67,22 +69,23 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "turns": 34,
         "density": 0.42,
         "charges": 2,
+        "patrols": 2,
         "items": {"emp": 1, "smoke": 1, "mirror": 1, "drone": 1},
-        "desc": "8×8。警備が厚く道具も乏しい。通る道をよく選ぶこと。",
+        "desc": "8×8。巡回2人。警備が厚く道具も乏しい。通る道をよく選ぶこと。",
     },
-    "master": {
+    "expert": {
         "label": "伝説",
         "emoji": "💀",
         "size": 9,
         "turns": 36,
         "density": 0.46,
         "charges": 2,
+        "patrols": 3,
         "items": {"emp": 1, "smoke": 1, "mirror": 0, "drone": 0},
-        "desc": "9×9。鏡もドローンも無い。館の記憶と勘だけが頼り。",
+        "desc": "9×9。巡回3人。鏡もドローンも無い。館の記憶と勘だけが頼り。",
     },
 }
-DIFFICULTY_ORDER = ["novice", "normal", "hard", "master"]
-DEFAULT_DIFFICULTY = "normal"
+DEFAULT_DIFFICULTY = state.DEFAULT_LEVEL
 
 CELL_EMPTY = "empty"
 CELL_LASER = "laser"
@@ -101,6 +104,11 @@ CELL_ICON = {
 }
 PLAYER_ICON = "🥷"
 FOG_ICON = "❔"
+PATROL_ICON = "👮"
+
+# 巡回する警備員。持ち場に立つ 💂 と違い、毎ターン1歩動く。
+PATROL_DETECT = 2   # この距離まで近づかれると、こちらへ寄ってくる
+PATROL_LURE_PUSH = 3  # 幻術師の幻影で引き離せる距離
 
 HAZARD_LABELS = {CELL_LASER: "レーザー", CELL_CAMERA: "監視カメラ", CELL_GUARD: "警備員"}
 ALERT_GAIN = {CELL_LASER: 30, CELL_CAMERA: 25}
@@ -135,7 +143,7 @@ TRAITS: dict[str, dict[str, str]] = {
         "label": "幻術師",
         "emoji": "🎭",
         "counters": CELL_GUARD,
-        "desc": "幻影で気を引き、警備員を別方向へ誘導する。",
+        "desc": "幻影で気を引き、巡回中の警備員をまとめて遠ざける。鉢合わせもやり過ごせる。",
     },
 }
 TRAIT_ORDER = ["hacker", "engineer", "thief", "illusionist"]
@@ -164,13 +172,17 @@ HOW_TO_PLAY = """
 
 **障害物**
 - 🔴レーザー・📷監視カメラに無防備で踏み込むと警戒度が上昇する。警戒度が100%になると失敗。
-- 💂警備員に無防備で踏み込むと、その場で見つかり即座に失敗になる。
+- 💂警備員（動かない）に無防備で踏み込むと、その場で見つかり即座に失敗になる。
+- 👮**警備員（巡回中）はあなたが1歩動くたびに1歩動きます。** 2マス以内に入ると
+  こちらへ寄ってきます。鉢合わせると即失敗。難易度が上がるほど人数が増えます。
+  角で待つ、引きつけてから回り込む——通り抜ける順番が勝負を分けます。
 
 **特性（開始時に1つ選択。対応する障害物を無効化できる。回数は難易度による）**
 - 💻ハッカー: 監視カメラを無効化
 - 🔧エンジニア: レーザーを停止
 - 🥷怪盗: 足音を消して警備員をやり過ごす
-- 🎭幻術師: 幻術で警備員を誘導
+- 🎭幻術師: 鉢合わせをやり過ごせるうえ、**ボタンで近くの巡回をまとめて遠ざけられる**
+  （巡回のいない館では出番がありません）
 
 **アイテム（対応する障害物に入ったとき自動で消費される）**
 - ⚡EMP: カメラを一時停止 / 💨煙幕: 警備員をやり過ごす / 🪞鏡: レーザーを反射
@@ -269,10 +281,132 @@ def generate_map(
     raise RuntimeError("到達可能なマップの生成に失敗しました。")
 
 
+def spawn_patrols(
+    gmap: dict[str, Any], count: int, rng: random.Random
+) -> list[dict[str, Any]]:
+    """巡回する警備員を配置する。
+
+    開始地点のすぐそばには置かない（開幕即詰みを避ける）。宝石・出口の上にも
+    置かない（そこに立たれると回収できない時間が生まれてしまう）。
+    """
+    if count <= 0:
+        return []
+    size = gmap["size"]
+    forbidden = {gmap["start"], gmap["gem"], gmap["exit"]}
+    cells = [
+        (r, c)
+        for r in range(size)
+        for c in range(size)
+        if (r, c) not in forbidden and _manhattan((r, c), gmap["start"]) >= 3
+    ]
+    rng.shuffle(cells)
+    return [
+        {"pos": pos, "dir": rng.choice(list(DIRECTIONS))}
+        for pos in cells[:count]
+    ]
+
+
+def _step_toward(src: tuple[int, int], dst: tuple[int, int]) -> tuple[int, int]:
+    """src から dst へ1歩ぶんの差分。距離が縮む向きを1つ選ぶ。"""
+    dr = dst[0] - src[0]
+    dc = dst[1] - src[1]
+    if abs(dr) >= abs(dc) and dr != 0:
+        return (1 if dr > 0 else -1, 0)
+    if dc != 0:
+        return (0, 1 if dc > 0 else -1)
+    return (0, 0)
+
+
+def _in_bounds(pos: tuple[int, int], size: int) -> bool:
+    return 0 <= pos[0] < size and 0 <= pos[1] < size
+
+
+def move_patrols(
+    gs: dict[str, Any], rng: random.Random
+) -> list[tuple[int, int]]:
+    """警備員を1歩ずつ動かし、動いた後の位置を返す。
+
+    プレイヤーが PATROL_DETECT 以内にいれば寄ってくる。そうでなければ今の向きへ
+    進み、壁に当たったら向きを変える。待つ・引きつけるという判断が生まれるように、
+    追跡は距離が近いときだけにしている。
+    """
+    if not gs.get("patrols"):
+        return []
+    size = gs["map"]["size"]
+    player = tuple(gs["pos"])
+
+    for p in gs["patrols"]:
+        pos = tuple(p["pos"])
+        if _manhattan(pos, player) <= PATROL_DETECT:
+            step = _step_toward(pos, player)
+        else:
+            step = DIRECTIONS[p["dir"]]
+            if not _in_bounds((pos[0] + step[0], pos[1] + step[1]), size):
+                # 壁。別の進める向きへ切り替える。
+                options = [
+                    d for d, (dr, dc) in DIRECTIONS.items()
+                    if _in_bounds((pos[0] + dr, pos[1] + dc), size)
+                ]
+                if options:
+                    p["dir"] = rng.choice(options)
+                    step = DIRECTIONS[p["dir"]]
+                else:
+                    step = (0, 0)
+
+        nxt = (pos[0] + step[0], pos[1] + step[1])
+        if _in_bounds(nxt, size):
+            p["pos"] = nxt
+
+    return [tuple(p["pos"]) for p in gs["patrols"]]
+
+
+def patrol_on_player(gs: dict[str, Any]) -> bool:
+    """警備員とプレイヤーが同じマスにいるか。"""
+    player = tuple(gs["pos"])
+    return any(tuple(p["pos"]) == player for p in gs.get("patrols", []))
+
+
+def lure_patrols(gs: dict[str, Any]) -> dict[str, Any]:
+    """幻術師の能力。幻影を出して近くの警備員を引き離す。
+
+    持ち場の警備員（💂）をすり抜ける怪盗に対し、幻術師は「動く警備員を
+    遠ざける」ことができる。巡回がいて初めて意味を持つ能力。
+    """
+    if gs["phase"] != "playing":
+        return {"ok": False, "message": "今は使用できない。"}
+    if gs.get("trait") != "illusionist":
+        return {"ok": False, "message": "幻術師にしか使えない。"}
+    if gs["trait_charges"] <= 0:
+        return {"ok": False, "message": "幻影を出す力が残っていない。"}
+
+    player = tuple(gs["pos"])
+    size = gs["map"]["size"]
+    near = [p for p in gs.get("patrols", []) if _manhattan(tuple(p["pos"]), player) <= PATROL_LURE_PUSH]
+    if not near:
+        return {"ok": False, "message": "近くに引きつけられる警備員がいない。"}
+
+    gs["trait_charges"] -= 1
+    for p in near:
+        pos = tuple(p["pos"])
+        away = _step_toward(player, pos)  # プレイヤーから見て警備員のいる向き＝遠ざける向き
+        for _ in range(PATROL_LURE_PUSH):
+            nxt = (pos[0] + away[0], pos[1] + away[1])
+            if not _in_bounds(nxt, size):
+                break
+            pos = nxt
+        p["pos"] = pos
+
+    msg = f"🎭 幻影で警備員 {len(near)} 人の気を引き、遠ざけた！"
+    gs["log"].append(msg)
+    gs["log"] = gs["log"][-6:]
+    return {"ok": True, "message": msg}
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "phase": "trait_select",  # trait_select -> playing -> ended
         "difficulty": DEFAULT_DIFFICULTY,
+        "patrols": [],
         "trait": None,
         "trait_charges": 0,
         "items": dict(ITEM_START_COUNTS),
@@ -301,22 +435,21 @@ def _reveal_around(gs: dict[str, Any], pos: tuple[int, int]) -> None:
                 gs["revealed"].add((nr, nc))
 
 
-def set_difficulty(gs: dict[str, Any], key: str) -> None:
-    """潜入前に難易度を選ぶ。開始後は変えられない。"""
-    if gs["phase"] == "trait_select" and key in DIFFICULTIES:
-        gs["difficulty"] = key
-
-
 def reroll_map(gs: dict[str, Any]) -> None:
     """同じ難易度のまま、別の館（別のマップ）を引き直す。"""
     if gs["phase"] == "trait_select":
         gs["rng_seed"] = random.randrange(1_000_000_000)
 
 
-def select_trait(gs: dict[str, Any], trait_key: str) -> None:
-    """特性を確定し、選んだ難易度でマップを生成してプレイ開始状態にする。"""
+def select_trait(gs: dict[str, Any], trait_key: str, difficulty_key: str | None = None) -> None:
+    """特性を確定し、選んだ難易度でマップを生成してプレイ開始状態にする。
+
+    difficulty_key は遊び方画面で選ばれた難易度。省略時は state に入っている値。
+    """
     if gs["phase"] != "trait_select" or trait_key not in TRAITS:
         return
+    if difficulty_key in DIFFICULTIES:
+        gs["difficulty"] = difficulty_key
     diff = DIFFICULTIES[gs.get("difficulty", DEFAULT_DIFFICULTY)]
 
     gs["trait"] = trait_key
@@ -327,6 +460,7 @@ def select_trait(gs: dict[str, Any], trait_key: str) -> None:
     rng = random.Random(gs["rng_seed"])
     gmap = generate_map(rng, diff["size"], diff["density"])
     gs["map"] = gmap
+    gs["patrols"] = spawn_patrols(gmap, diff["patrols"], rng)
     gs["pos"] = gmap["start"]
     gs["has_gem"] = False
     gs["alert"] = 0
@@ -409,6 +543,46 @@ def _resolve_hazard(gs: dict[str, Any], r: int, c: int, hazard_type: str, result
         result["event"] = "alert"
 
 
+def _remove_patrol_at(gs: dict[str, Any], pos: tuple[int, int]) -> None:
+    """やり過ごした警備員をその場から外す（追い払った扱い）。"""
+    gs["patrols"] = [p for p in gs["patrols"] if tuple(p["pos"]) != tuple(pos)]
+
+
+def _resolve_patrol_contact(
+    gs: dict[str, Any], result: dict[str, Any], approached: bool = False
+) -> None:
+    """巡回中の警備員と鉢合わせたときの解決。
+
+    持ち場の警備員（💂）と同じく、まず特性、次に煙幕でやり過ごす。どちらも
+    無ければ捕まる。approached=True は「向こうから寄ってきた」場合。
+    """
+    player = tuple(gs["pos"])
+
+    if use_trait(gs, CELL_GUARD):
+        _remove_patrol_at(gs, player)
+        info = TRAITS[gs["trait"]]
+        result["message"] = f"{info['emoji']} {info['label']}の能力で巡回中の警備員をやり過ごした！"
+        result["event"] = "trait_used"
+        return
+
+    if use_item(gs, "smoke"):
+        _remove_patrol_at(gs, player)
+        info = ITEMS["smoke"]
+        result["message"] = f"{info['emoji']} {info['label']}で巡回中の警備員の視界を遮った！"
+        result["event"] = "item_used"
+        return
+
+    gs["phase"] = "ended"
+    gs["win"] = False
+    gs["end_reason"] = (
+        "巡回中の警備員に見つかり、取り押さえられた。"
+        if approached
+        else "巡回中の警備員に正面から鉢合わせた。"
+    )
+    result["message"] = f"{PATROL_ICON} 巡回中の警備員に見つかった！"
+    result["event"] = "caught"
+
+
 def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
     """direction ("up"/"down"/"left"/"right") へ1マス移動を試みる。
 
@@ -453,6 +627,17 @@ def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
     else:
         result["message"] = "静かな通路を進んだ。"
 
+    # 踏み込んだ先に巡回中の警備員がいた場合。
+    if gs["phase"] == "playing" and patrol_on_player(gs):
+        _resolve_patrol_contact(gs, result)
+
+    # プレイヤーが動いたぶん、警備員も動く。
+    if gs["phase"] == "playing" and gs.get("patrols"):
+        rng = random.Random(gs["rng_seed"] * 7919 + gs["turns_used"])
+        move_patrols(gs, rng)
+        if patrol_on_player(gs):
+            _resolve_patrol_contact(gs, result, approached=True)
+
     if result["message"]:
         gs["log"].append(result["message"])
         gs["log"] = gs["log"][-6:]
@@ -476,27 +661,20 @@ def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
 
 
 def _render_trait_select(gs: dict[str, Any]) -> None:
-    current = gs.get("difficulty", DEFAULT_DIFFICULTY)
+    # 難易度は遊び方画面で選ばれている。ここではその内訳を見せるだけ。
+    level = state.difficulty(NAME)
+    if level not in DIFFICULTIES:
+        level = DEFAULT_DIFFICULTY
+    gs["difficulty"] = level
+    diff = DIFFICULTIES[level]
 
-    st.subheader("① 潜入する館を選ぶ")
-    chosen = st.radio(
-        "難易度",
-        options=DIFFICULTY_ORDER,
-        index=DIFFICULTY_ORDER.index(current),
-        format_func=lambda k: f"{DIFFICULTIES[k]['emoji']} {DIFFICULTIES[k]['label']}",
-        horizontal=True,
-        key="mus_difficulty",
-    )
-    if chosen != current:
-        set_difficulty(gs, chosen)
-        st.rerun()
-
-    diff = DIFFICULTIES[current]
+    st.subheader(f"潜入する館：{diff['emoji']} {diff['label']}")
     st.caption(diff["desc"])
     ui.metric_row(
         [
             ("広さ", f"{diff['size']}×{diff['size']}"),
             ("持ち時間", f"{diff['turns']}手"),
+            ("巡回する警備員", f"{diff['patrols']}人"),
             ("特性の使用回数", f"{diff['charges']}回"),
             ("道具の総数", sum(diff["items"].values())),
         ]
@@ -510,7 +688,7 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
     st.caption(f"館の見取り図: #{gs['rng_seed']}　同じ番号なら同じ間取りになる。")
 
     st.divider()
-    st.subheader("② 特性を1つ選ぶ（選ぶと潜入開始）")
+    st.subheader("特性を1つ選ぶ（選ぶと潜入開始）")
 
     cols = st.columns(4)
     for col, key in zip(cols, TRAIT_ORDER):
@@ -519,9 +697,11 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
             with st.container(border=True):
                 st.markdown(f"### {info['emoji']} {info['label']}")
                 st.write(info["desc"])
-                st.caption(f"この難易度では {diff['charges']} 回まで使える。")
+                st.caption(f"この館では {diff['charges']} 回まで使える。")
+                if key == "illusionist" and diff["patrols"] == 0:
+                    st.caption("⚠️ この館に巡回はいない。幻影を出す相手がいない。")
                 if st.button("この特性で潜入する", key=f"mus_trait_{key}", use_container_width=True):
-                    select_trait(gs, key)
+                    select_trait(gs, key, level)
                     st.rerun()
 
 
@@ -532,6 +712,7 @@ def _render_grid(gs: dict[str, Any]) -> None:
     pos = tuple(gs["pos"])
     revealed = gs["revealed"]
     revealed_all = gs["revealed_all"]
+    patrol_at = {tuple(p["pos"]) for p in gs.get("patrols", [])}
 
     for r in range(size):
         cols = st.columns(size, gap="small")
@@ -539,10 +720,13 @@ def _render_grid(gs: dict[str, Any]) -> None:
             with cols[c]:
                 if (r, c) == pos:
                     symbol = PLAYER_ICON
-                elif revealed_all or (r, c) in revealed:
-                    symbol = CELL_ICON[grid[r][c]]
-                else:
+                elif not (revealed_all or (r, c) in revealed):
                     symbol = FOG_ICON
+                elif (r, c) in patrol_at:
+                    # 巡回は持ち場の警備員より優先して見せる（動くので危険）
+                    symbol = PATROL_ICON
+                else:
+                    symbol = CELL_ICON[grid[r][c]]
                 st.markdown(
                     "<div style='text-align:center;font-size:26px;line-height:1.4;"
                     "border:1px solid rgba(128,128,128,0.25);border-radius:6px;"
@@ -562,6 +746,7 @@ def _render_playing(gs: dict[str, Any]) -> None:
             ("警戒度", f"{gs['alert']}% / {ALERT_MAX}%"),
             ("ターン", f"{gs['turns_used']}/{max_turns}"),
             ("宝石", "💎所持" if gs["has_gem"] else "未回収"),
+            ("巡回中", f"{len(gs.get('patrols', []))}人"),
             (f"{trait_info['emoji']} {trait_info['label']} 残り", gs["trait_charges"]),
         ]
     )
@@ -569,7 +754,15 @@ def _render_playing(gs: dict[str, Any]) -> None:
 
     st.write("")
     _render_grid(gs)
-    st.caption(f"{PLAYER_ICON} あなた　・通路　🔴レーザー　📷カメラ　💂警備員　💎宝石　🚪出口　{FOG_ICON}未偵察")
+    st.caption(
+        f"{PLAYER_ICON} あなた　・通路　🔴レーザー　📷カメラ　💂警備員（動かない）　"
+        f"{PATROL_ICON}警備員（巡回中・毎ターン動く）　💎宝石　🚪出口　{FOG_ICON}未偵察"
+    )
+    if gs.get("patrols"):
+        st.caption(
+            f"{PATROL_ICON} 巡回はあなたが動くたびに1歩動きます。"
+            f"{PATROL_DETECT}マス以内に入ると、こちらへ寄ってきます。"
+        )
 
     st.write("#### 移動")
     st.caption("⌨️ キーボードの十字キー（← ↑ ↓ →）でも移動できます。")
@@ -603,6 +796,21 @@ def _render_playing(gs: dict[str, Any]) -> None:
             "ArrowRight": "mus_move_right",
         }
     )
+
+    # 幻術師だけが持つ能動的な能力。巡回がいて初めて意味を持つ。
+    if gs["trait"] == "illusionist":
+        near = [
+            p for p in gs.get("patrols", [])
+            if _manhattan(tuple(p["pos"]), tuple(gs["pos"])) <= PATROL_LURE_PUSH
+        ]
+        if st.button(
+            f"🎭 幻影で警備員を誘導する（近くに {len(near)} 人 / 残り {gs['trait_charges']} 回）",
+            key="mus_lure",
+            use_container_width=True,
+            disabled=not near or gs["trait_charges"] <= 0,
+        ):
+            lure_patrols(gs)
+            st.rerun()
 
     st.write("#### 所持アイテム")
     item_cols = st.columns(4)

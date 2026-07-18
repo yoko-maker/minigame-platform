@@ -102,14 +102,139 @@ EVENTS: list[dict[str, Any]] = [
 
 WIN_SCORE_THRESHOLD = 60.0
 
-HOW_TO_PLAY = f"""
-**目標**: {TOTAL_DAYS}営業日を終えたときの「総合評価スコア」が {WIN_SCORE_THRESHOLD:.0f} 点以上なら勝利です。
+# 猫の気質。同じ「猫」でも、客の呼び方と消耗の仕方が違う。
+# 誰を働かせて誰を休ませるかが、この違いによって意味を持つ。
+CAT_BREEDS: dict[str, dict[str, Any]] = {
+    "friendly": {
+        "label": "人懐こい",
+        "emoji": "😻",
+        "appeal": 1.25,        # 客を呼ぶ力
+        "fatigue_rate": 1.30,  # 疲れやすさ
+        "crowd": 0.0,          # 混雑で機嫌を損ねる度合い
+        "desc": "誰にでも寄っていく。よく懐くぶん、すぐ疲れる。",
+    },
+    "shy": {
+        "label": "人見知り",
+        "emoji": "🙀",
+        "appeal": 0.80,
+        "fatigue_rate": 0.85,
+        "crowd": 1.6,
+        "desc": "客が多いと隠れてしまう。静かな日ほど機嫌がいい。",
+    },
+    "star": {
+        "label": "看板猫",
+        "emoji": "😺",
+        "appeal": 1.55,
+        "fatigue_rate": 1.45,
+        "crowd": 0.0,
+        "desc": "この子目当ての客が来る。人気は抜群だが消耗も激しい。",
+    },
+    "calm": {
+        "label": "マイペース",
+        "emoji": "😽",
+        "appeal": 0.95,
+        "fatigue_rate": 0.65,
+        "crowd": 0.0,
+        "desc": "何があっても動じない。疲れにくく、機嫌も安定している。",
+    },
+}
 
-1. 毎朝、**価格・広告投資・設備投資・猫を休ませるか** を決めます。
+CAT_NAMES = ["みかん", "そら", "だいふく", "こむぎ", "レオ", "ゆず", "もち", "ちゃちゃ"]
+
+# 難易度。営業日数・初期資金・合格ライン・猫の頭数・固定費が変わる。
+# 猫が多いほど客は呼べるが、その日の疲労を分散できる一方で餌代がかさむ。
+DIFFICULTIES: dict[str, dict[str, Any]] = {
+    "easy": {
+        "label": "趣味の店",
+        "emoji": "🔰",
+        "days": 10,
+        "funds": 8000,
+        "win": 50.0,
+        "cats": 4,
+        "cost_scale": 0.8,
+        "desc": "10日・資金8,000円・猫4匹。固定費も安く、合格ラインは50点。",
+    },
+    "normal": {
+        "label": "町の猫カフェ",
+        "emoji": "🎯",
+        "days": 10,
+        "funds": 5000,
+        "win": 60.0,
+        "cats": 3,
+        "cost_scale": 1.0,
+        "desc": "10日・資金5,000円・猫3匹。標準の経営。合格ラインは60点。",
+    },
+    "hard": {
+        "label": "駅前の激戦区",
+        "emoji": "🔥",
+        "days": 12,
+        "funds": 3500,
+        "win": 68.0,
+        "cats": 3,
+        "cost_scale": 1.25,
+        "desc": "12日・資金3,500円・猫3匹。家賃が高く、合格ラインは68点。",
+    },
+    "expert": {
+        "label": "潰れかけの店",
+        "emoji": "💀",
+        "days": 14,
+        "funds": 2000,
+        "win": 75.0,
+        "cats": 2,
+        "cost_scale": 1.5,
+        "desc": "14日・資金2,000円・猫2匹。猫が少なく休ませる余裕もない。合格ラインは75点。",
+    },
+}
+DEFAULT_DIFFICULTY = state.DEFAULT_LEVEL
+
+
+def settings_for(level: str) -> dict[str, Any]:
+    return DIFFICULTIES.get(level, DIFFICULTIES[DEFAULT_DIFFICULTY])
+
+
+def create_cats(count: int, rng: random.Random) -> list[dict[str, Any]]:
+    """開店時の猫たちを用意する。気質は必ずばらけさせる。"""
+    breeds = list(CAT_BREEDS)
+    rng.shuffle(breeds)
+    names = list(CAT_NAMES)
+    rng.shuffle(names)
+
+    cats = []
+    for i in range(count):
+        breed = breeds[i % len(breeds)]
+        cats.append({
+            "id": i,
+            "name": names[i],
+            "breed": breed,
+            "mood": rng.randint(60, 80),
+            "fatigue": rng.randint(5, 15),
+            "popularity": rng.randint(25, 45),
+        })
+    return cats
+
+
+def cat_label(cat: dict[str, Any]) -> str:
+    b = CAT_BREEDS[cat["breed"]]
+    return f"{b['emoji']} {cat['name']}（{b['label']}）"
+
+HOW_TO_PLAY = f"""
+**目標**: 決められた営業日数を終えたときの「総合評価スコア」が合格ライン以上なら勝利です。
+
+1. 毎朝、**価格・広告投資・設備投資・どの猫を休ませるか** を決めます。
 2. 「営業開始」を押すと、その日の来客数・売上・コスト・利益と、ランダムイベントの結果が表示されます。
 3. 結果画面には **🗣️ 入場者の声** が出ます。値段・広告・設備・猫の様子への反応なので、
    不満が出た点を翌日の方針で直していくと評価が伸びます。
-4. 「次の日へ」で翌日に進みます。これを{TOTAL_DAYS}日間繰り返します。
+4. 「次の日へ」で翌日に進みます。
+
+**猫は1匹ずつ性格が違います**
+- 😻 人懐こい … よく客に懐いて集客できるが、すぐ疲れる
+- 🙀 人見知り … 客が多い日は隠れてしまい機嫌が下がる。静かな日向き
+- 😺 看板猫 … この子目当ての客が来る。集客は抜群だが消耗が激しい
+- 😽 マイペース … 疲れにくく機嫌も安定。集客は普通
+
+**その日の客は、働いている猫で分け合います。** 何匹も出勤させれば1匹あたりの負担は
+軽くなりますが、餌代は頭数ぶんかかります。疲れた子を休ませると回復しますが、
+その子目当ての客は来ません。**全員休ませると休業日**になります。
 
 **猫のコンディションはすべて 0〜{CAT_STAT_MAX} の目盛りです**
 - 😺 機嫌: 高いほど良い（{CAT_MOOD_GOOD}以上を保ちたい）
@@ -122,15 +247,12 @@ HOW_TO_PLAY = f"""
 - 💼 会社員: 価格にはあまり敏感でないが、数はあまり増えない
 - 🧳 観光客: 広告（口コミ）に敏感で客単価が高い
 
-**猫のコンディション**
-- 疲労が溜まると機嫌・人気が下がりやすくなります。
-- 「今日は休ませる」を選ぶと営業時間は短縮されますが、疲労が大きく回復します。
-- 設備投資（レベルアップ）は疲労の蓄積を抑え、満足度を底上げします。
-
 **ランダムイベント**: 雨・テレビ紹介・SNSで話題・猫の脱走などが日替わりで発生し、
 来客数や猫の状態、コストに影響します。
 
 **資金が {BANKRUPTCY_LIMIT:,} 円を下回ると経営破綻で即ゲームオーバーです。**
+
+**難易度によって、営業日数・初期資金・合格ライン・猫の頭数・固定費が変わります。**
 """
 
 
@@ -153,30 +275,49 @@ def roll_event(rng: random.Random) -> dict[str, Any]:
     return dict(EVENTS[0])
 
 
+def cafe_appeal(cats: list[dict[str, Any]]) -> float:
+    """店として客を呼ぶ力。働く猫の人気を、気質の集客力で重み付けした平均。"""
+    if not cats:
+        return 0.0
+    total = sum(c["popularity"] * CAT_BREEDS[c["breed"]]["appeal"] for c in cats)
+    return total / len(cats)
+
+
+def cafe_mood(cats: list[dict[str, Any]]) -> float:
+    if not cats:
+        return 0.0
+    return sum(c["mood"] for c in cats) / len(cats)
+
+
 def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     """1日分の営業をシミュレートする純粋関数。
 
     Args:
         gamestate: {"funds": float, "reputation": float,
-                     "cat": {"mood": int, "fatigue": int, "popularity": int},
-                     "facility_level": int}
+                     "cats": [{"id","name","breed","mood","fatigue","popularity"}, ...],
+                     "facility_level": int, "cost_scale": float}
         settings: {"price": int, "ad_level": int(0-3),
-                    "rest_cat": bool, "invest_equipment": bool}
+                    "resting": [猫のid], "invest_equipment": bool}
         rng: 日ごとに固定される random.Random インスタンス。
 
     Returns:
         当日の結果と更新後ステータス（"gamestate" キー配下）を含む dict。
-        入力の gamestate/cat は変更しない。
+        入力の gamestate/cats は変更しない。
     """
-    cat = gamestate["cat"]
+    cats = [dict(c) for c in gamestate["cats"]]
     funds = gamestate["funds"]
     reputation = gamestate["reputation"]
     facility_level = gamestate["facility_level"]
+    cost_scale = gamestate.get("cost_scale", 1.0)
 
     price = settings["price"]
     ad_level = settings["ad_level"]
-    rest_cat = settings["rest_cat"]
+    resting_ids = set(settings.get("resting", []))
     invest_equipment = settings["invest_equipment"] and facility_level < FACILITY_MAX
+
+    working = [c for c in cats if c["id"] not in resting_ids]
+    resting = [c for c in cats if c["id"] in resting_ids]
+    closed = not working  # 全員休ませたら開店できない
 
     event = roll_event(rng)
 
@@ -185,65 +326,88 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     new_facility_level = facility_level + 1 if invest_equipment else facility_level
 
     # --- 来客数（客層ごと） ---
-    popularity_mult = 0.6 + cat["popularity"] / 100 * 0.8  # 0.6 - 1.4
-    mood_mult = 0.75 + cat["mood"] / 100 * 0.5  # 0.75 - 1.25
-    operation_mult = 0.4 if rest_cat else 1.0
+    segment_visitors: dict[str, int] = {seg["key"]: 0 for seg in SEGMENTS}
+    if not closed:
+        appeal = cafe_appeal(working)
+        mood_avg = cafe_mood(working)
+        popularity_mult = 0.6 + min(appeal, 100) / 100 * 0.8   # 0.6 - 1.4
+        mood_mult = 0.75 + mood_avg / 100 * 0.5                # 0.75 - 1.25
+        # 何匹働いているかで店の回転が決まる
+        operation_mult = 0.4 + 0.6 * (len(working) / max(1, len(cats)))
 
-    segment_visitors: dict[str, int] = {}
-    for seg in SEGMENTS:
-        price_ratio_excess = (price - PRICE_REF) / PRICE_REF
-        price_mult = _clamp(1 - seg["price_sensitivity"] * price_ratio_excess, 0.15, 1.8)
-        ad_mult = 1 + ad_level * 0.15 * seg["ad_sensitivity"]
+        for seg in SEGMENTS:
+            price_ratio_excess = (price - PRICE_REF) / PRICE_REF
+            price_mult = _clamp(1 - seg["price_sensitivity"] * price_ratio_excess, 0.15, 1.8)
+            ad_mult = 1 + ad_level * 0.15 * seg["ad_sensitivity"]
 
-        mean_visitors = seg["base_visitors"] * price_mult * ad_mult * popularity_mult * mood_mult * event["visitor_mult"] * operation_mult
-        raw = rng.gauss(mean_visitors, max(mean_visitors * 0.25, 0.5))
-        segment_visitors[seg["key"]] = int(_clamp(round(raw), 0, 300))
+            mean_visitors = (
+                seg["base_visitors"] * price_mult * ad_mult * popularity_mult
+                * mood_mult * event["visitor_mult"] * operation_mult
+            )
+            raw = rng.gauss(mean_visitors, max(mean_visitors * 0.25, 0.5))
+            segment_visitors[seg["key"]] = int(_clamp(round(raw), 0, 300))
 
-    total_visitors = sum(segment_visitors.values())
-    total_visitors = min(total_visitors, 400)
+    total_visitors = min(sum(segment_visitors.values()), 400)
 
     # --- 売上・コスト ---
-    tip_revenue = round(total_visitors * (cat["mood"] / 100) * 15)
+    mood_now = cafe_mood(working) if working else 0.0
+    tip_revenue = round(total_visitors * (mood_now / 100) * 15)
     revenue = total_visitors * price + tip_revenue
-    cost = BASE_DAILY_COST + AD_COSTS[ad_level] + CAT_CARE_COST + event["extra_cost"] + equipment_cost
+    # 猫の世話代は頭数ぶんかかる。多く飼うほど固定費が重い。
+    care_cost = round(CAT_CARE_COST * len(cats) / 3 * cost_scale)
+    base_cost = round(BASE_DAILY_COST * cost_scale)
+    cost = base_cost + AD_COSTS[ad_level] + care_cost + event["extra_cost"] + equipment_cost
     profit = revenue - cost
     new_funds = funds + profit
 
-    # --- 猫のコンディション更新 ---
-    if rest_cat:
-        new_fatigue = _clamp(cat["fatigue"] - 30, 0, 100)
-        new_mood = _clamp(cat["mood"] + 10 + event["mood_delta"], 0, 100)
-        new_popularity = _clamp(cat["popularity"] - 2 + event["popularity_delta"], 0, 100)
-    else:
-        fatigue_gain = max(total_visitors * 0.6 - new_facility_level * 5, 2)
-        new_fatigue = _clamp(cat["fatigue"] + fatigue_gain, 0, 100)
+    # --- 猫ごとのコンディション更新 ---
+    # その日の客を働いた猫で分け合う。頭数が多いほど1匹あたりの負担が軽い。
+    load = total_visitors / max(1, len(working))
+    new_cats: list[dict[str, Any]] = []
+    for c in cats:
+        b = CAT_BREEDS[c["breed"]]
+        if c["id"] in resting_ids:
+            fatigue = _clamp(c["fatigue"] - 30, 0, 100)
+            mood = _clamp(c["mood"] + 10 + event["mood_delta"], 0, 100)
+            popularity = _clamp(c["popularity"] - 2 + event["popularity_delta"], 0, 100)
+        else:
+            gain = max(load * 0.6 * b["fatigue_rate"] - new_facility_level * 5, 2)
+            fatigue = _clamp(c["fatigue"] + gain, 0, 100)
 
-        mood_shift = 0.0
-        if new_fatigue > CAT_FATIGUE_WARN:
-            mood_shift -= 8
-        elif new_fatigue < 30:
-            mood_shift += 4
-        mood_shift += event["mood_delta"] + new_facility_level * 1.0
-        new_mood = _clamp(cat["mood"] + mood_shift, 0, 100)
+            mood_shift = 0.0
+            if fatigue > CAT_FATIGUE_WARN:
+                mood_shift -= 8
+            elif fatigue < 30:
+                mood_shift += 4
+            # 人見知りは混雑そのものが応える
+            mood_shift -= b["crowd"] * max(0.0, load - 12) * 0.35
+            mood_shift += event["mood_delta"] + new_facility_level * 1.0
+            mood = _clamp(c["mood"] + mood_shift, 0, 100)
 
-        popularity_shift = -1.0 + event["popularity_delta"]
-        if new_mood >= CAT_MOOD_GOOD and new_fatigue <= 60:
-            popularity_shift += 2
-        new_popularity = _clamp(cat["popularity"] + popularity_shift, 0, 100)
+            popularity_shift = -1.0 + event["popularity_delta"]
+            if mood >= CAT_MOOD_GOOD and fatigue <= 60:
+                popularity_shift += 2 * b["appeal"]
+            popularity = _clamp(c["popularity"] + popularity_shift, 0, 100)
 
-    new_cat = {
-        "mood": int(round(new_mood)),
-        "fatigue": int(round(new_fatigue)),
-        "popularity": int(round(new_popularity)),
-    }
+        new_cats.append({
+            **c,
+            "mood": int(round(mood)),
+            "fatigue": int(round(fatigue)),
+            "popularity": int(round(popularity)),
+        })
 
     # --- 評価（満足度 -> 評価スコアへゆっくり収束） ---
     price_ratio_excess = (price - PRICE_REF) / PRICE_REF
-    satisfaction = 50 + (new_cat["mood"] - 50) * 0.3 + new_facility_level * 4
-    satisfaction -= max(0.0, new_cat["fatigue"] - 70) * 0.4
-    satisfaction -= max(0.0, price_ratio_excess) * 15
-    satisfaction += event["satisfaction_delta"]
-    satisfaction = _clamp(satisfaction, 0, 100)
+    if closed:
+        # 休業日は評価が少しだけ落ちる（来た客が入れないため）
+        satisfaction = _clamp(reputation - 6, 0, 100)
+    else:
+        worked_after = [c for c in new_cats if c["id"] not in resting_ids]
+        satisfaction = 50 + (cafe_mood(worked_after) - 50) * 0.3 + new_facility_level * 4
+        satisfaction -= max(0.0, max(c["fatigue"] for c in worked_after) - 70) * 0.4
+        satisfaction -= max(0.0, price_ratio_excess) * 15
+        satisfaction += event["satisfaction_delta"]
+        satisfaction = _clamp(satisfaction, 0, 100)
 
     reputation_delta = (satisfaction - reputation) * 0.22 + rng.uniform(-1.5, 1.5)
     new_reputation = _clamp(reputation + reputation_delta, 0, 100)
@@ -253,30 +417,35 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     result: dict[str, Any] = {
         "event": event,
         "settings": dict(settings),
+        "closed": closed,
         "segment_visitors": segment_visitors,
         "total_visitors": total_visitors,
         "revenue": revenue,
         "tip_revenue": tip_revenue,
         "cost": cost,
         "cost_breakdown": {
-            "base": BASE_DAILY_COST,
+            "base": base_cost,
             "ad": AD_COSTS[ad_level],
-            "cat_care": CAT_CARE_COST,
+            "cat_care": care_cost,
             "event": event["extra_cost"],
             "equipment": equipment_cost,
         },
         "profit": profit,
         "satisfaction": satisfaction,
         "reputation_delta": reputation_delta,
-        "cat_before": dict(cat),
-        "cat_after": new_cat,
+        "cats_before": [dict(c) for c in gamestate["cats"]],
+        "cats_after": new_cats,
+        "worked": [c["id"] for c in working],
+        "rested": [c["id"] for c in resting],
+        "load": load,
         "equipment_invested": invest_equipment,
         "bankrupt": bankrupt,
         "gamestate": {
             "funds": new_funds,
             "reputation": new_reputation,
-            "cat": new_cat,
+            "cats": new_cats,
             "facility_level": new_facility_level,
+            "cost_scale": cost_scale,
         },
     }
     # 客の声はその日の結果から導くので、結果が揃ってから最後に組み立てる。
@@ -297,12 +466,26 @@ def customer_voices(
         [{"who": 客層ラベル, "text": 発言, "tone": "bad"|"good"|"info"}, ...]
     """
     settings = result["settings"]
-    cat = result["cat_after"]
+    cats = result["cats_after"]
+    worked = [c for c in cats if c["id"] in result["worked"]]
     event = result["event"]
     price = settings["price"]
     ad_level = settings["ad_level"]
     facility = result["gamestate"]["facility_level"]
     visitors = result["total_visitors"]
+
+    if result.get("closed"):
+        return [{
+            "who": "🚪 貼り紙を見た人",
+            "text": "今日はお休みだったんですね……。楽しみにして来たのですが。",
+            "tone": "info",
+        }]
+
+    # 店の代表値は「働いた猫」から取る。休ませた猫の機嫌は客に見えていない。
+    pool = worked or cats
+    tired = max(pool, key=lambda c: c["fatigue"])
+    grumpy = min(pool, key=lambda c: c["mood"])
+    star = max(pool, key=lambda c: c["popularity"])
 
     # (優先度, 声) の候補。優先度が高いほど「今いちばん効いている原因」。
     candidates: list[tuple[float, dict[str, str]]] = []
@@ -333,30 +516,61 @@ def customer_voices(
             "tone": "good",
         }))
 
-    if cat["fatigue"] > CAT_FATIGUE_WARN:
+    if tired["fatigue"] > CAT_FATIGUE_WARN:
         candidates.append((12, {
             "who": "👪 家族",
-            "text": "猫ちゃん、ぐったりしてました……。無理させてないといいんですけど。",
+            "text": f"{tired['name']}ちゃん、ぐったりしてました……。無理させてないといいんですけど。",
             "tone": "bad",
         }))
-    elif cat["fatigue"] < 30 and cat["mood"] >= CAT_MOOD_GOOD:
+    elif tired["fatigue"] < 30 and grumpy["mood"] >= CAT_MOOD_GOOD:
         candidates.append((4, {
             "who": "🧳 観光客",
-            "text": "猫がのびのびしてて、見てるだけで癒されました！",
+            "text": "猫たちがのびのびしてて、見てるだけで癒されました！",
             "tone": "good",
         }))
 
-    if cat["mood"] < 40:
+    if grumpy["mood"] < 40:
         candidates.append((11, {
             "who": "🎒 学生",
-            "text": "猫が全然こっち来てくれなくて……。機嫌が悪かったのかな。",
+            "text": f"{grumpy['name']}が全然こっち来てくれなくて……。機嫌が悪かったのかな。",
             "tone": "bad",
         }))
-    elif cat["mood"] >= 85:
+    elif grumpy["mood"] >= 85:
         candidates.append((4, {
             "who": "👪 家族",
-            "text": "膝の上で寝てくれました。子どもが大喜びでしたよ。",
+            "text": f"{star['name']}が膝の上で寝てくれました。子どもが大喜びでしたよ。",
             "tone": "good",
+        }))
+
+    # 気質ごとの声。誰を働かせるかの判断に直結する。
+    shy_crowded = [c for c in worked if c["breed"] == "shy" and result["load"] > 14]
+    if shy_crowded:
+        candidates.append((10, {
+            "who": "🧳 観光客",
+            "text": f"{shy_crowded[0]['name']}はずっと棚の上で隠れてました。人が多すぎたのかも。",
+            "tone": "bad",
+        }))
+
+    star_worked = [c for c in worked if c["breed"] == "star"]
+    if star_worked and star_worked[0]["fatigue"] > CAT_FATIGUE_WARN:
+        candidates.append((11, {
+            "who": "🎒 学生",
+            "text": f"{star_worked[0]['name']}目当てで来たんですけど、しんどそうで見てられなくて。",
+            "tone": "bad",
+        }))
+    elif star_worked:
+        candidates.append((5, {
+            "who": "🧳 観光客",
+            "text": f"{star_worked[0]['name']}に会いに来ました！写真いっぱい撮れて満足です。",
+            "tone": "good",
+        }))
+
+    resting_star = [c for c in cats if c["breed"] == "star" and c["id"] in result["rested"]]
+    if resting_star:
+        candidates.append((8, {
+            "who": "👪 家族",
+            "text": f"{resting_star[0]['name']}に会いたかったのに、今日はお休みなんですね……。",
+            "tone": "info",
         }))
 
     if facility == 0:
@@ -383,13 +597,6 @@ def customer_voices(
             "who": "🎒 学生",
             "text": "広告を見て来ました！ずっと気になってたんです。",
             "tone": "good",
-        }))
-
-    if settings["rest_cat"]:
-        candidates.append((9, {
-            "who": "👪 家族",
-            "text": "今日は早じまいだったんですね。せっかく来たのに残念でした。",
-            "tone": "info",
         }))
 
     if event["id"] == "escape":
@@ -423,16 +630,23 @@ def customer_voices(
     return [voice for _prio, voice in candidates[:limit]]
 
 
-def final_evaluation(gamestate: dict[str, Any]) -> dict[str, Any]:
-    """最終日終了後の総合評価を計算する純粋関数。"""
+def final_evaluation(
+    gamestate: dict[str, Any],
+    initial_funds: int = INITIAL_FUNDS,
+    win_threshold: float = WIN_SCORE_THRESHOLD,
+) -> dict[str, Any]:
+    """最終日終了後の総合評価を計算する純粋関数。
+
+    initial_funds / win_threshold は難易度によって変わる。
+    """
     funds = gamestate["funds"]
     reputation = gamestate["reputation"]
 
-    total_profit = funds - INITIAL_FUNDS
+    total_profit = funds - initial_funds
     profit_score = _clamp(50 + total_profit / 150, 0, 100)
     composite = reputation * 0.6 + profit_score * 0.4
     stars = round(composite / 20 * 2) / 2  # 0.5刻みで 0-5
-    win = composite >= WIN_SCORE_THRESHOLD and funds > 0
+    win = composite >= win_threshold and funds > 0
 
     return {
         "score": composite,
@@ -449,14 +663,22 @@ def final_evaluation(gamestate: dict[str, Any]) -> dict[str, Any]:
 # state ヘルパー
 # ---------------------------------------------------------------------------
 
-def _default_state() -> dict[str, Any]:
+def _default_state(level: str | None = None) -> dict[str, Any]:
+    level = level or DEFAULT_DIFFICULTY
+    cfg = settings_for(level)
+    seed = random.randrange(1_000_000)
     return {
-        "rng_seed": random.randrange(1_000_000),
+        "rng_seed": seed,
+        "difficulty": level,
         "day": 1,
         "phase": "plan",  # "plan" -> "result" -> ("plan" | "gameover")
-        "funds": float(INITIAL_FUNDS),
+        "funds": float(cfg["funds"]),
+        "initial_funds": cfg["funds"],
+        "total_days": cfg["days"],
+        "win_threshold": cfg["win"],
+        "cost_scale": cfg["cost_scale"],
         "reputation": 50.0,
-        "cat": {"mood": 70, "fatigue": 10, "popularity": 35},
+        "cats": create_cats(cfg["cats"], random.Random(seed)),
         "facility_level": 0,
         "history": [],
         "pending_result": None,
@@ -476,7 +698,8 @@ def _day_rng(s: dict[str, Any]) -> random.Random:
 
 def render() -> None:
     ui.game_header("🐈 癒し猫カフェ", NAME, how_to_play=HOW_TO_PLAY)
-    s = state.game_state(NAME, _default_state)
+    # 難易度は遊び方画面で選ばれている。開店時にその条件で店を用意する。
+    s = state.game_state(NAME, lambda: _default_state(state.difficulty(NAME)))
 
     if s["phase"] == "plan":
         _render_plan(s)
@@ -486,39 +709,48 @@ def render() -> None:
         _render_gameover(s)
 
 
-def _render_cat_condition(cat: dict[str, int]) -> None:
-    """猫の状態を「いくつまであるのか」「どちらへ動かしたいのか」が分かる形で出す。
+def _render_cat_condition(cats: list[dict[str, Any]], resting_ids: set[int] | None = None) -> None:
+    """猫たちの状態を「いくつまであるのか」「どちらへ動かしたいのか」が分かる形で出す。
 
     数字だけだと 70 が高いのか低いのかが読めないので、上限とバーを必ず添える。
     """
+    resting_ids = resting_ids or set()
     st.markdown("**🐈 猫のコンディション**")
-    rows = [
-        ("😺 機嫌", cat["mood"], f"高いほど客が喜び、チップも増える（{CAT_MOOD_GOOD}以上を保ちたい）"),
-        ("😪 疲労", cat["fatigue"], f"低いほど良い。{CAT_FATIGUE_WARN}を超えると機嫌が下がり始める"),
-        ("⭐ 人気", cat["popularity"], "高いほど客が増える。機嫌が良く疲れていない日が続くと伸びる"),
-    ]
-    for label, value, note in rows:
-        st.progress(
-            _clamp(value, 0, 100) / 100,
-            text=f"{label}　{value} / {CAT_STAT_MAX}　— {note}",
-        )
+    st.caption(
+        f"すべて 0〜{CAT_STAT_MAX} の目盛り。"
+        f"😺機嫌は高いほど良い（{CAT_MOOD_GOOD}以上を保ちたい）／"
+        f"😪疲労は低いほど良い（{CAT_FATIGUE_WARN}超で機嫌が下がる）／⭐人気は高いほど客が増える"
+    )
+    for c in cats:
+        b = CAT_BREEDS[c["breed"]]
+        with st.container(border=True):
+            head = f"**{cat_label(c)}**"
+            if c["id"] in resting_ids:
+                head += "　💤 今日はお休み"
+            st.markdown(head)
+            st.caption(b["desc"])
+            st.progress(_clamp(c["mood"], 0, 100) / 100, text=f"😺 機嫌　{c['mood']} / {CAT_STAT_MAX}")
+            st.progress(_clamp(c["fatigue"], 0, 100) / 100, text=f"😪 疲労　{c['fatigue']} / {CAT_STAT_MAX}")
+            st.progress(_clamp(c["popularity"], 0, 100) / 100, text=f"⭐ 人気　{c['popularity']} / {CAT_STAT_MAX}")
 
 
 def _render_plan(s: dict[str, Any]) -> None:
-    st.subheader(f"📅 {s['day']}日目 / {TOTAL_DAYS}日 - 方針決定")
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
+    st.subheader(f"📅 {s['day']}日目 / {s['total_days']}日 - 方針決定")
 
-    cat = s["cat"]
+    cats = s["cats"]
     ui.metric_row([
+        ("難易度", f"{cfg['emoji']} {cfg['label']}"),
         ("資金", f"¥{int(s['funds']):,}"),
         ("評価スコア", f"{s['reputation']:.0f} / 100"),
-        ("合格ライン", f"{WIN_SCORE_THRESHOLD:.0f}"),
+        ("合格ライン", f"{s['win_threshold']:.0f}"),
     ])
-    _render_cat_condition(cat)
 
-    if cat["fatigue"] > CAT_FATIGUE_WARN:
+    tired = [c for c in cats if c["fatigue"] > CAT_FATIGUE_WARN]
+    if tired:
         st.warning(
-            f"😿 疲労が {cat['fatigue']} / {CAT_STAT_MAX} です。"
-            f"{CAT_FATIGUE_WARN} を超えると機嫌が下がり始めます。休ませることを検討しましょう。"
+            "😿 " + "、".join(c["name"] for c in tired) +
+            f" の疲労が {CAT_FATIGUE_WARN} を超えています。休ませることを検討しましょう。"
         )
     if s["funds"] < 0:
         st.warning(f"⚠️ 資金がマイナスです。{BANKRUPTCY_LIMIT:,} 円を下回ると経営破綻します。")
@@ -538,10 +770,17 @@ def _render_plan(s: dict[str, Any]) -> None:
             key="cc_ad_level",
         )
     with col2:
-        rest_cat = st.checkbox(
-            "😴 今日は猫を休ませる（営業時間短縮・疲労が大きく回復）",
-            key="cc_rest_cat",
-        )
+        st.markdown("**😴 今日休ませる猫**")
+        st.caption("休ませると疲労が大きく回復しますが、その子目当ての客は来ません。全員休ませると休業日になります。")
+        resting: list[int] = []
+        for c in cats:
+            b = CAT_BREEDS[c["breed"]]
+            if st.checkbox(
+                f"{b['emoji']} {c['name']}を休ませる（疲労 {c['fatigue']}）",
+                key=f"cc_rest_{c['id']}",
+            ):
+                resting.append(c["id"])
+
         if s["facility_level"] < FACILITY_MAX:
             cost = FACILITY_UPGRADE_COSTS[s["facility_level"]]
             invest_equipment = st.checkbox(
@@ -552,25 +791,31 @@ def _render_plan(s: dict[str, Any]) -> None:
             st.caption("🛠️ 設備は最大レベルです。")
             invest_equipment = False
 
+    _render_cat_condition(cats, set(resting))
+
+    if resting and len(resting) == len(cats):
+        st.info("🚪 全員を休ませると今日は休業日になります（売上ゼロ・評価が少し下がります）。")
+
     if st.button("☕ 営業開始", key="cc_start_day", type="primary", use_container_width=True):
         settings = {
             "price": price,
             "ad_level": ad_level,
-            "rest_cat": rest_cat,
+            "resting": resting,
             "invest_equipment": invest_equipment,
         }
         gamestate = {
             "funds": s["funds"],
             "reputation": s["reputation"],
-            "cat": dict(s["cat"]),
+            "cats": [dict(c) for c in s["cats"]],
             "facility_level": s["facility_level"],
+            "cost_scale": s["cost_scale"],
         }
         rng = _day_rng(s)
         result = simulate_day(gamestate, settings, rng)
 
         s["funds"] = result["gamestate"]["funds"]
         s["reputation"] = result["gamestate"]["reputation"]
-        s["cat"] = result["gamestate"]["cat"]
+        s["cats"] = result["gamestate"]["cats"]
         s["facility_level"] = result["gamestate"]["facility_level"]
         s["pending_result"] = result
         s["bankrupt"] = result["bankrupt"]
@@ -642,10 +887,8 @@ def _render_result(s: dict[str, Any]) -> None:
 
     _render_voices(result.get("voices", []))
 
-    cat_before, cat_after = result["cat_before"], result["cat_after"]
     st.markdown("**猫のコンディション変化**")
-    _cat_delta_row(cat_before, cat_after)
-    _render_cat_condition(cat_after)
+    _cat_delta_row(result["cats_before"], result["cats_after"], set(result["rested"]))
 
     st.markdown(
         f"**評価スコア**: {result['gamestate']['reputation']:.1f} / 100 "
@@ -659,13 +902,13 @@ def _render_result(s: dict[str, Any]) -> None:
     if result["bankrupt"]:
         st.error("💥 資金がマイナス4,000円を下回りました。経営破綻です。")
         label = "結果を見る"
-    elif s["day"] >= TOTAL_DAYS:
+    elif s["day"] >= s["total_days"]:
         label = "結果を見る"
     else:
         label = "次の日へ"
 
     if st.button(f"➡️ {label}", key="cc_next_day", type="primary", use_container_width=True):
-        if result["bankrupt"] or s["day"] >= TOTAL_DAYS:
+        if result["bankrupt"] or s["day"] >= s["total_days"]:
             s["phase"] = "gameover"
         else:
             s["day"] += 1
@@ -673,18 +916,38 @@ def _render_result(s: dict[str, Any]) -> None:
         st.rerun()
 
 
-def _cat_delta_row(before: dict[str, int], after: dict[str, int]) -> None:
-    cols = st.columns(3)
-    labels = [("mood", "機嫌"), ("fatigue", "疲労"), ("popularity", "人気")]
-    for col, (key, label) in zip(cols, labels):
-        delta = after[key] - before[key]
-        col.metric(label, after[key], delta=delta)
+def _cat_delta_row(
+    before: list[dict[str, Any]], after: list[dict[str, Any]], rested: set[int]
+) -> None:
+    """猫ごとの変化。誰にしわ寄せが行ったのかが分かるように1匹ずつ出す。"""
+    prev = {c["id"]: c for c in before}
+    for c in after:
+        b0 = prev.get(c["id"], c)
+        with st.container(border=True):
+            head = f"**{cat_label(c)}**"
+            head += "　💤 お休み" if c["id"] in rested else "　🏪 出勤"
+            st.markdown(head)
+            cols = st.columns(3)
+            for col, (key, label) in zip(
+                cols, [("mood", "😺 機嫌"), ("fatigue", "😪 疲労"), ("popularity", "⭐ 人気")]
+            ):
+                col.metric(
+                    label,
+                    f"{c[key]} / {CAT_STAT_MAX}",
+                    delta=c[key] - b0[key],
+                    # 疲労は増えると悪いので、色の意味を反転させる
+                    delta_color="inverse" if key == "fatigue" else "normal",
+                )
 
 
 def _render_gameover(s: dict[str, Any]) -> None:
     st.subheader("🏁 最終結果")
 
-    evaluation = final_evaluation({"funds": s["funds"], "reputation": s["reputation"]})
+    evaluation = final_evaluation(
+        {"funds": s["funds"], "reputation": s["reputation"]},
+        initial_funds=s["initial_funds"],
+        win_threshold=s["win_threshold"],
+    )
 
     if s.get("bankrupt"):
         ui.result_banner(
@@ -695,8 +958,8 @@ def _render_gameover(s: dict[str, Any]) -> None:
     else:
         ui.result_banner(
             evaluation["win"],
-            win_msg=f"{TOTAL_DAYS}日間の営業お疲れ様でした！総合評価スコア {evaluation['score']:.0f} 点で繁盛店の仲間入りです！",
-            lose_msg=f"{TOTAL_DAYS}日間の営業お疲れ様でした。総合評価スコア {evaluation['score']:.0f} 点… もう一歩でした。",
+            win_msg=f"{s['total_days']}日間の営業お疲れ様でした！総合評価スコア {evaluation['score']:.0f} 点で繁盛店の仲間入りです！",
+            lose_msg=f"{s['total_days']}日間の営業お疲れ様でした。総合評価スコア {evaluation['score']:.0f} 点… もう一歩でした。",
         )
 
     stars_full = int(evaluation["stars"])

@@ -30,10 +30,65 @@ NAME = "black_market"
 # ゲームバランス定数
 # ---------------------------------------------------------------------------
 
-START_MONEY = 1000          # 開始資金
-TOTAL_ROUNDS = 5            # 商品の数（ラウンド数）
-TARGET_PROFIT = 300         # 勝利条件: 累計利益がこの値以上
+START_MONEY = 1000          # 既定値。実際の値は難易度から取る
+TOTAL_ROUNDS = 5
+TARGET_PROFIT = 300
 MAX_EXCHANGES = 5           # 1商品あたりの最大「入札の押し合い」回数（無限ループ防止）
+
+# 難易度。開始資金・商品数・目標利益に加えて、相手の強気度（上限の底上げ）と
+# 情報の値段が変わる。上の難易度ほど「情報を買う余裕」が無くなっていく。
+DIFFICULTIES: dict[str, dict[str, Any]] = {
+    "easy": {
+        "label": "冷やかし",
+        "emoji": "🔰",
+        "money": 1400,
+        "rounds": 5,
+        "target": 200,
+        "rival_boost": 0.85,   # 相手の入札上限にかかる倍率（小さいほど降りやすい）
+        "info_scale": 0.7,     # 情報の値段の倍率
+        "desc": "資金1,400円で5品。相手は弱気で、情報も安い。目標は+200円。",
+    },
+    "normal": {
+        "label": "常連",
+        "emoji": "🎯",
+        "money": 1000,
+        "rounds": 5,
+        "target": 300,
+        "rival_boost": 1.0,
+        "info_scale": 1.0,
+        "desc": "資金1,000円で5品。標準の卓。目標は+300円。",
+    },
+    "hard": {
+        "label": "同業者",
+        "emoji": "🔥",
+        "money": 800,
+        "rounds": 6,
+        "target": 450,
+        "rival_boost": 1.15,
+        "info_scale": 1.3,
+        "desc": "資金800円で6品。相手は強気で情報も高い。目標は+450円。",
+    },
+    "expert": {
+        "label": "元締め",
+        "emoji": "💀",
+        "money": 600,
+        "rounds": 6,
+        "target": 600,
+        "rival_boost": 1.3,
+        "info_scale": 1.6,
+        "desc": "資金600円で6品。相手は上限まで食い下がり、情報は贅沢品。目標は+600円。",
+    },
+}
+DEFAULT_DIFFICULTY = state.DEFAULT_LEVEL
+
+
+def settings_for(level: str) -> dict[str, Any]:
+    return DIFFICULTIES.get(level, DIFFICULTIES[DEFAULT_DIFFICULTY])
+
+
+def info_cost(key: str, info_scale: float = 1.0) -> int:
+    """難易度に応じた情報の値段。"""
+    return max(1, round(INFO_TYPES[key]["cost"] * info_scale))
 
 # ---------------------------------------------------------------------------
 # データ表（モジュール定数）
@@ -137,8 +192,8 @@ PERSONALITIES: dict[str, dict[str, Any]] = {
     },
 }
 
-HOW_TO_PLAY = f"""
-- 全{TOTAL_ROUNDS}回の競りで、闇市場に出品される商品を競り落として利益を稼ごう。
+HOW_TO_PLAY = """
+- 闇市場に出品される商品を競り落として利益を稼ごう。
 - 商品の**真の価値は隠されている**。「情報を購入する」で噂・簡易鑑定・市場価格を買うと、
   価値の手がかり（推定値）が得られる。ただし情報にはコストがかかり、精度も異なる
   （市場価格 > 簡易鑑定 > 噂 の順に高精度・高コスト）。
@@ -151,7 +206,10 @@ HOW_TO_PLAY = f"""
 - 落札できれば **(真の価値 − 支払額 − 情報コスト)** が利益。競り負けたら情報コストだけが
   損失になる（払いすぎにも情報の買いすぎにも注意）。決着後に相手の上限が開示されるので、
   次のラウンドの読みに使えます。
-- 全{TOTAL_ROUNDS}回終了時点の累計利益が **+{TARGET_PROFIT}** 以上なら勝利。
+- 全ラウンド終了時点の累計利益が**目標以上**なら勝利。
+
+**難易度によって、開始資金・商品数・目標利益・相手の強気さ・情報の値段が変わります。**
+上の難易度ほど資金が細く情報が高いので、「どこで情報を買うか」がそのまま勝敗になります。
 """
 
 
@@ -178,14 +236,19 @@ def estimate_value(item: dict[str, Any], info_key: str, rng: random.Random) -> d
     return {"estimate": estimate, "cost": info["cost"], "label": info["label"], "confidence": info["confidence"]}
 
 
-def compute_ai_ceiling(item: dict[str, Any], personality_key: str, rng: random.Random) -> int:
-    """AIが内心持っている入札上限（他者には非公開）を計算する。"""
+def compute_ai_ceiling(
+    item: dict[str, Any], personality_key: str, rng: random.Random, boost: float = 1.0
+) -> int:
+    """AIが内心持っている入札上限（他者には非公開）を計算する。
+
+    boost は難易度による強気度。大きいほど高値まで食い下がってくる。
+    """
     p = PERSONALITIES[personality_key]
     lo, hi = p["base_ratio"]
     ratio = rng.uniform(lo, hi)
     if item["category"] in p["favorites"]:
         ratio += p["favorite_bonus"] * rng.uniform(0.5, 1.0)
-    return max(1, round(item["true_value"] * ratio))
+    return max(1, round(item["true_value"] * ratio * boost))
 
 
 def ai_opening_bid(ceiling: int, rng: random.Random) -> int:
@@ -246,13 +309,15 @@ def settle(won: bool, price_paid: int, true_value: int, info_cost_total: int) ->
 # 振り切れるかが見えてくる。
 # ---------------------------------------------------------------------------
 
-def create_rivals(item: dict[str, Any], rng: random.Random) -> list[dict[str, Any]]:
+def create_rivals(
+    item: dict[str, Any], rng: random.Random, boost: float = 1.0
+) -> list[dict[str, Any]]:
     """その商品に対する3体の競争相手を作る。上限は各自の胸の内（非公開）。"""
     rivals = []
     for key in PERSONALITIES:
         rivals.append({
             "key": key,
-            "ceiling": compute_ai_ceiling(item, key, rng),
+            "ceiling": compute_ai_ceiling(item, key, rng, boost),
             "folded": False,
         })
     return rivals
@@ -308,8 +373,9 @@ def all_folded(rivals: list[dict[str, Any]]) -> bool:
 def _start_round(s: dict[str, Any]) -> None:
     """ラウンド固有の状態を初期化する（資金・累計利益などグローバルな値は触らない）。"""
     rng: random.Random = s["rng"]
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
     s["current_item"] = generate_item(rng)
-    s["rivals"] = create_rivals(s["current_item"], rng)
+    s["rivals"] = create_rivals(s["current_item"], rng, cfg["rival_boost"])
     s["info_bought"] = {}
     s["info_cost_total"] = 0
     s["round_phase"] = "shop"
@@ -321,16 +387,19 @@ def _start_round(s: dict[str, Any]) -> None:
     s["last_result"] = None
 
 
-def _default_state() -> dict[str, Any]:
+def _default_state(level: str | None = None) -> dict[str, Any]:
+    cfg = settings_for(level or DEFAULT_DIFFICULTY)
     seed = random.randint(0, 2**31 - 1)
     s: dict[str, Any] = {
         "stage": "playing",
+        "difficulty": level or DEFAULT_DIFFICULTY,
         "rng_seed": seed,
         "rng": random.Random(seed),
-        "money": START_MONEY,
+        "money": cfg["money"],
+        "start_money": cfg["money"],
         "round_num": 1,
-        "total_rounds": TOTAL_ROUNDS,
-        "target_profit": TARGET_PROFIT,
+        "total_rounds": cfg["rounds"],
+        "target_profit": cfg["target"],
         "history": [],
     }
     _start_round(s)
@@ -338,12 +407,14 @@ def _default_state() -> dict[str, Any]:
 
 
 def _buy_info(s: dict[str, Any], key: str) -> None:
-    info = INFO_TYPES[key]
-    if key in s["info_bought"] or s["money"] < info["cost"]:
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
+    cost = info_cost(key, cfg["info_scale"])
+    if key in s["info_bought"] or s["money"] < cost:
         return
     est = estimate_value(s["current_item"], key, s["rng"])
-    s["money"] -= info["cost"]
-    s["info_cost_total"] += info["cost"]
+    s["money"] -= cost
+    s["info_cost_total"] += cost
+    est["cost"] = cost
     s["info_bought"][key] = est
 
 
@@ -456,18 +527,21 @@ def _process_pass(s: dict[str, Any]) -> None:
 
 def render() -> None:
     ui.game_header("💰 ブラックマーケット", NAME, how_to_play=HOW_TO_PLAY)
-    s = state.game_state(NAME, _default_state)
+    # 難易度は遊び方画面で選ばれている。開始時にその設定で卓を組む。
+    s = state.game_state(NAME, lambda: _default_state(state.difficulty(NAME)))
 
     if s["stage"] == "finished":
         _render_finished(s)
         return
 
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
     ui.metric_row(
         [
-            ("資金", f"¥{s['money']}"),
+            ("難易度", f"{cfg['emoji']} {cfg['label']}"),
+            ("資金", f"¥{s['money']:,}"),
             ("ラウンド", f"{s['round_num']} / {s['total_rounds']}"),
-            ("累計利益", f"¥{s['money'] - START_MONEY}"),
-            ("目標利益", f"¥{s['target_profit']}"),
+            ("累計利益", f"¥{s['money'] - s['start_money']:,}"),
+            ("目標利益", f"¥{s['target_profit']:,}"),
         ]
     )
     st.divider()
@@ -507,17 +581,19 @@ def _render_shop_phase(s: dict[str, Any]) -> None:
     st.caption(cat["flavor"])
     _render_rivals(s)
 
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
     st.markdown("#### 🔎 情報を購入する（任意）")
     cols = st.columns(len(INFO_TYPES))
     for col, (key, info) in zip(cols, INFO_TYPES.items()):
+        cost = info_cost(key, cfg["info_scale"])
         with col:
-            st.write(f"**{info['label']}**（¥{info['cost']} / 信頼度: {info['confidence']}）")
+            st.write(f"**{info['label']}**（¥{cost:,} / 信頼度: {info['confidence']}）")
             st.caption(info["desc"])
             bought = key in s["info_bought"]
             if bought:
-                st.success(f"推定価値: 約¥{s['info_bought'][key]['estimate']}")
+                st.success(f"推定価値: 約¥{s['info_bought'][key]['estimate']:,}")
             else:
-                disabled = s["money"] < info["cost"]
+                disabled = s["money"] < cost
                 if st.button("購入する", key=f"bm_buy_{key}", disabled=disabled, use_container_width=True):
                     _buy_info(s, key)
                     st.rerun()
@@ -611,7 +687,7 @@ def _render_settled_phase(s: dict[str, Any]) -> None:
         [
             ("情報コスト", f"¥{r['info_cost']:,}"),
             ("このラウンドの利益", f"¥{r['profit']:,}"),
-            ("累計利益", f"¥{s['money'] - START_MONEY:,}"),
+            ("累計利益", f"¥{s['money'] - s['start_money']:,}"),
         ]
     )
 
@@ -637,7 +713,7 @@ def _render_settled_phase(s: dict[str, Any]) -> None:
 
 
 def _render_finished(s: dict[str, Any]) -> None:
-    profit = s["money"] - START_MONEY
+    profit = s["money"] - s["start_money"]
     win = profit >= s["target_profit"]
 
     ui.result_banner(

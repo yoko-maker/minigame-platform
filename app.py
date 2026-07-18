@@ -99,7 +99,8 @@ def main() -> None:
         if state.is_started(page):
             module.render()
         else:
-            ui.briefing(page, module.HOW_TO_PLAY)
+            # 難易度を持つゲームなら、遊び方画面に選択欄が出る。
+            ui.briefing(page, module.HOW_TO_PLAY, getattr(module, "DIFFICULTIES", None))
 
     # 遷移してきた直後なら、ページ最上部から読ませる。
     if state.take_scroll_request():

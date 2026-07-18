@@ -159,11 +159,44 @@ def bind_keys(mapping: dict[str, str]) -> None:
     )
 
 
-def briefing(game_key: str, how_to_play: str) -> None:
+def difficulty_picker(game_key: str, difficulties: dict) -> str:
+    """遊び方画面に置く難易度の選択。選ばれているキーを返す。
+
+    Args:
+        difficulties: {レベルキー: {"label", "emoji", "desc", ...ゲーム固有の値}}
+                      キーは state.LEVELS のうち、そのゲームが用意したもの。
+    """
+    levels = [lv for lv in state.LEVELS if lv in difficulties]
+    current = state.difficulty(game_key)
+    if current not in levels:
+        current = levels[0]
+
+    st.markdown("**難易度**")
+    chosen = st.radio(
+        "難易度",
+        options=levels,
+        index=levels.index(current),
+        format_func=lambda k: f"{difficulties[k]['emoji']} {difficulties[k]['label']}",
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"difficulty_{game_key}",
+    )
+    if chosen != current:
+        state.set_difficulty(game_key, chosen)
+        st.rerun()
+
+    st.caption(difficulties[chosen]["desc"])
+    return chosen
+
+
+def briefing(game_key: str, how_to_play: str, difficulties: dict | None = None) -> None:
     """ゲーム本編に入る前の「遊び方」画面。
 
     ゲームを選ぶとまずこの画面が出る。スタートを押して初めて本編が始まる。
     そのゲームの世界観に最初に触れる場所なので、扉として作る。
+
+    Args:
+        difficulties: ゲームが DIFFICULTIES を持っていれば渡す。難易度の選択欄が出る。
     """
     title, desc, icon = state.GAME_META[game_key]
     eyebrow = theme.token(game_key, "eyebrow")
@@ -186,6 +219,11 @@ def briefing(game_key: str, how_to_play: str) -> None:
         st.markdown('<div class="briefing-body">', unsafe_allow_html=True)
         st.markdown(how_to_play)
         st.markdown("</div>", unsafe_allow_html=True)
+
+        if difficulties:
+            st.divider()
+            difficulty_picker(game_key, difficulties)
+
         st.write("")
         if st.button("▶ ゲームを始める", key=f"start_{game_key}", type="primary", use_container_width=True):
             state.mark_started(game_key)
