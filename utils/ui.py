@@ -104,6 +104,31 @@ def scroll_to_top() -> None:
     )
 
 
+def personal_best_line(game_key: str, level: str) -> None:
+    """その難易度の自己ベストを控えめに表示する（無ければ何も出さない）。
+
+    各ゲームの結果画面や遊び方画面から呼ぶ。ホーム画面では呼ばないこと
+    （ゲーム横断で記録を並べると実質ランキングになり、仕様方針に反するため）。
+    """
+    best = state.get_best(game_key, level)
+    if best:
+        st.caption(f"🏅 自己ベスト（この難易度）: {best['label']}")
+
+
+def record_and_show_best(game_key: str, level: str, value: float, label: str) -> bool:
+    """結果画面で自己ベストを記録し、更新なら祝福を、そうでなければ現ベストを表示する。
+
+    二重記録は各ゲーム側で state のフラグで防ぐこと（この関数は毎回記録を試みる）。
+    戻り値は「自己ベストを更新したか」。
+    """
+    updated = state.record_best(game_key, level, value, label)
+    if updated:
+        st.success(f"🏅 自己ベスト更新！（この難易度）: {label}")
+    else:
+        personal_best_line(game_key, level)
+    return updated
+
+
 def bind_keys(mapping: dict[str, str]) -> None:
     """キーボードのキーを、指定した key を持つボタンのクリックに割り当てる。
 
@@ -222,7 +247,9 @@ def briefing(game_key: str, how_to_play: str, difficulties: dict | None = None) 
 
         if difficulties:
             st.divider()
-            difficulty_picker(game_key, difficulties)
+            chosen = difficulty_picker(game_key, difficulties)
+            # その難易度の自己ベストがあれば、始める前にそっと見せる。
+            personal_best_line(game_key, chosen)
 
         st.write("")
         if st.button("▶ ゲームを始める", key=f"start_{game_key}", type="primary", use_container_width=True):

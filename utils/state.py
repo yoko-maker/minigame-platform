@@ -32,6 +32,7 @@ GAME_META = {gid: (title, desc, icon) for gid, title, desc, icon in GAMES}
 _SCROLL_KEY = "_scroll_to_top"
 _STARTED_KEY = "_started_games"
 _DIFFICULTY_KEY = "_difficulties"
+_MEMO_KEY = "_memos"
 
 # 難易度の段階。4ゲーム共通の目盛りにしておき、各ゲームは
 # モジュール定数 DIFFICULTIES に、この4キーぶんの「呼び名」と「効き方」を書く。
@@ -129,6 +130,41 @@ def set_difficulty(name: str, level: str) -> None:
     if _DIFFICULTY_KEY not in st.session_state:
         st.session_state[_DIFFICULTY_KEY] = {}
     st.session_state[_DIFFICULTY_KEY][name] = level
+
+
+# ---------------------------------------------------------------------------
+# ゲーム内自己ベスト: reset を跨いで残る per-game の記録。
+#
+# 仕様書の「ゲーム間データ共有なし」を守るため、ここに保存する値は
+#   - そのゲーム専用の名前空間 memo_<name> に閉じる
+#   - 他ゲームから読み合う経路を作らない
+#   - ホーム画面など横断的な場所には出さない（各ゲーム内でのみ表示する）
+# ことを前提とする。難易度別に「大きいほど良い」数値1つで自己ベストを持つ。
+# ---------------------------------------------------------------------------
+
+def game_memo(name: str) -> dict[str, Any]:
+    """reset を跨いで残る、そのゲーム専用の記憶 dict。他ゲームからは触らない。"""
+    memos = st.session_state.setdefault(_MEMO_KEY, {})
+    return memos.setdefault(name, {})
+
+
+def get_best(name: str, level: str) -> dict[str, Any] | None:
+    """その難易度の自己ベスト {"value": float, "label": str} または None。"""
+    return game_memo(name).get("best", {}).get(level)
+
+
+def record_best(name: str, level: str, value: float, label: str) -> bool:
+    """自己ベストを更新する。更新したら True を返す。
+
+    value は「大きいほど良い」比較値（正解数・利益・スコア・ランク点など）。
+    label は表示用の文字列（"3 / 5 人" や "¥450" など、ゲームが決める）。
+    """
+    bests = game_memo(name).setdefault("best", {})
+    cur = bests.get(level)
+    if cur is None or value > cur["value"]:
+        bests[level] = {"value": float(value), "label": label}
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

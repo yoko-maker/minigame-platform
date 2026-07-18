@@ -12,7 +12,7 @@
   seed を state に保存することで進行を再現可能にしている。
 - ゲームロジックは Streamlit に依存しない純粋関数として切り出し
   （`generate_item`, `estimate_value`, `compute_ai_ceiling`, `ai_opening_bid`,
-  `ai_response`, `settle`）、UI 側はそれらを呼び出すだけにしている。
+  `ai_response`, `apply_pressure`, `settle`）、UI 側はそれらを呼び出すだけにしている。
 """
 
 from __future__ import annotations
@@ -260,11 +260,16 @@ def ai_opening_bid(ceiling: int, rng: random.Random) -> int:
 def ai_response(
     item: dict[str, Any],
     personality_key: str,
-    ceiling: int,
+    rival: dict[str, Any],
     player_bid: int,
     rng: random.Random,
 ) -> dict[str, Any]:
     """プレイヤーの入札に対するAIの応答。
+
+    Args:
+        rival: `create_rivals` が作った rival dict（"ceiling" を持つ）。
+               揺さぶり（`apply_pressure`）が書き込む一時補正キー
+               "fold_bonus" / "ceiling_shift" / "bluff_bonus" があれば反映する。
 
     Returns:
         {"fold": bool, "bid": int | None}
@@ -272,9 +277,13 @@ def ai_response(
         fold=False の場合 bid にAIの新しい提示額が入る（player_bid より高い）。
     """
     p = PERSONALITIES[personality_key]
+    ceiling = rival["ceiling"] + rival.get("ceiling_shift", 0)
+    fold_chance = min(0.95, max(0.0, p["fold_chance"] + rival.get("fold_bonus", 0.0)))
+    bluff_chance = min(0.95, max(0.0, p["bluff_chance"] + rival.get("bluff_bonus", 0.0)))
+
     if player_bid >= ceiling:
         # 上限を超えられた。基本は降りるが、性格によっては感情的に追い金を出す。
-        if rng.random() < p["bluff_chance"]:
+        if rng.random() < bluff_chance:
             bumped_ceiling = round(ceiling * rng.uniform(1.02, 1.15))
             if player_bid < bumped_ceiling:
                 new_bid = min(bumped_ceiling, player_bid + max(1, round(player_bid * 0.05)))
@@ -283,7 +292,7 @@ def ai_response(
         return {"fold": True, "bid": None}
 
     # まだ上限に余裕がある。性格によっては早めに弱気になって降りることもある。
-    if rng.random() < p["fold_chance"]:
+    if rng.random() < fold_chance:
         return {"fold": True, "bid": None}
 
     increment = max(1, round((ceiling - player_bid) * rng.uniform(0.2, 0.5)))
@@ -348,7 +357,7 @@ def rivals_respond(
     for r in rivals:
         if r["folded"]:
             continue
-        resp = ai_response(item, r["key"], r["ceiling"], player_bid, rng)
+        resp = ai_response(item, r["key"], r, player_bid, rng)
         if resp["fold"]:
             r["folded"] = True
             actions.append((r["key"], None))
@@ -364,6 +373,59 @@ def rivals_respond(
 
 def all_folded(rivals: list[dict[str, Any]]) -> bool:
     return all(r["folded"] for r in rivals)
+
+
+# ---------------------------------------------------------------------------
+# 揺さぶり（心理戦のプレイヤー側の一手）
+#
+# 1商品につき1回だけ宣言できる。まだ卓に残っている相手に対して、性格に応じた
+# 一時的な補正（fold_bonus / ceiling_shift / bluff_bonus）を rival dict に
+# 書き込む。補正は ai_response がその都度読むだけで、rival dict 自体は
+# create_rivals が毎ラウンド作り直すので、次の商品には持ち越さない。
+# ---------------------------------------------------------------------------
+
+PRESSURE_FOLD_BONUS = 0.10          # 投資家・(非好物の)コレクターの fold_chance 上乗せ
+PRESSURE_COLLECTOR_CEILING_RATIO = 0.08  # 好物のコレクターが意地を張って積む上限の上乗せ比率
+PRESSURE_COLLECTOR_FOLD_PENALTY = 0.05   # 好物のコレクターは逆に fold_chance が下がる
+PRESSURE_RESELLER_BLUFF_BONUS = 0.12     # 転売屋はブラフ返しに寄る
+
+
+def apply_pressure(
+    item: dict[str, Any], rivals: list[dict[str, Any]], rng: random.Random
+) -> list[tuple[str, str]]:
+    """揺さぶりをかけたときの、まだ卓に残っている相手それぞれの反応。
+
+    各 rival dict に一時補正キーを書き込む（fold_bonus: float, ceiling_shift: int,
+    bluff_bonus: float）。降りた相手には効果がないので何もしない。
+
+    Returns:
+        [(rival_key, 反応の一言), ...] 順序は rivals の並び順。
+    """
+    reactions: list[tuple[str, str]] = []
+    for r in rivals:
+        if r["folded"]:
+            continue
+        key = r["key"]
+        p = PERSONALITIES[key]
+        likes_this = item["category"] in p["favorites"]
+
+        if key == "investor":
+            r["fold_bonus"] = r.get("fold_bonus", 0.0) + PRESSURE_FOLD_BONUS
+            reactions.append((key, "採算を計算し直し、明らかに及び腰になった。"))
+        elif key == "collector":
+            if likes_this:
+                shift = max(1, round(r["ceiling"] * PRESSURE_COLLECTOR_CEILING_RATIO))
+                r["ceiling_shift"] = r.get("ceiling_shift", 0) + shift
+                r["fold_bonus"] = r.get("fold_bonus", 0.0) - PRESSURE_COLLECTOR_FOLD_PENALTY
+                reactions.append((key, "挑発されてむしろ意地になった。絶対に譲らない目つきだ。"))
+            else:
+                r["fold_bonus"] = r.get("fold_bonus", 0.0) + PRESSURE_FOLD_BONUS
+                reactions.append((key, "興味のない品で意地を張る気はないらしく、及び腰になった。"))
+        else:  # reseller
+            r["bluff_bonus"] = r.get("bluff_bonus", 0.0) + PRESSURE_RESELLER_BLUFF_BONUS
+            reactions.append((key, "動揺した素振りを見せつつ、逆に強気な駆け引きを仕掛け返してきた。"))
+
+    return reactions
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +447,7 @@ def _start_round(s: dict[str, Any]) -> None:
     s["bid_exchanges"] = 0
     s["auction_log"] = []
     s["last_result"] = None
+    s["pressure_used"] = False
 
 
 def _default_state(level: str | None = None) -> dict[str, Any]:
@@ -401,6 +464,7 @@ def _default_state(level: str | None = None) -> dict[str, Any]:
         "total_rounds": cfg["rounds"],
         "target_profit": cfg["target"],
         "history": [],
+        "best_recorded": False,
     }
     _start_round(s)
     return s
@@ -479,6 +543,7 @@ def _finalize_round(s: dict[str, Any], player_won: bool, price_paid: int) -> Non
         "true_value": item["true_value"],
         "info_cost": s["info_cost_total"],
         "profit": profit,
+        "pressure_used": s.get("pressure_used", False),
     }
     s["last_result"] = result
     s["history"].append(result)
@@ -514,6 +579,19 @@ def _process_player_bid(s: dict[str, Any], amount: int) -> None:
     s["leader"] = outcome["leader"]
     # 相手が上乗せしてきたので、次に必要な最低額まで入札額を引き上げ直す。
     _reset_bid_draft(s)
+
+
+def _process_pressure(s: dict[str, Any]) -> None:
+    """揺さぶりを宣言する。1商品につき1回だけ（呼び出し側が pressure_used を見て制御）。"""
+    rng: random.Random = s["rng"]
+    reactions = apply_pressure(s["current_item"], s["rivals"], rng)
+    s["pressure_used"] = True
+    s["auction_log"].append(("🧑 あなた", "😤 揺さぶりをかけた！"))
+    if reactions:
+        for key, text in reactions:
+            s["auction_log"].append((_rival_label(key), text))
+    else:
+        s["auction_log"].append(("卓の空気", "誰も反応しなかった…（残っている相手がいない）"))
 
 
 def _process_pass(s: dict[str, Any]) -> None:
@@ -666,6 +744,17 @@ def _render_bidding_phase(s: dict[str, Any]) -> None:
             _process_player_bid(s, int(draft))
             st.rerun()
 
+    pressure_used = s.get("pressure_used", False)
+    st.caption("😤 揺さぶり: 相手の反応を引き出す（この商品につき1回だけ）。降りやすくなる相手もいれば、好物の品では逆に意地になる相手もいる。")
+    if st.button(
+        "😤 揺さぶりをかける（この商品で1回）",
+        key="bm_pressure",
+        use_container_width=True,
+        disabled=pressure_used,
+    ):
+        _process_pressure(s)
+        st.rerun()
+
     if st.button("🏳️ 諦める（パス）", key="bm_pass", use_container_width=True):
         _process_pass(s)
         st.rerun()
@@ -693,6 +782,8 @@ def _render_settled_phase(s: dict[str, Any]) -> None:
 
     # 手の内を最後に開示する。次のラウンドで誰をどこまで警戒すべきかの学習材料。
     with st.expander("🃏 相手の手の内（決着後に開示）"):
+        if r.get("pressure_used"):
+            st.caption("😤 この商品では揺さぶりをかけた影響が、相手の降り際や粘りに出ていたかもしれない。")
         for rv in r.get("rivals", []):
             p = PERSONALITIES[rv["key"]]
             st.write(
@@ -721,6 +812,13 @@ def _render_finished(s: dict[str, Any]) -> None:
         f"目標達成！ 最終利益 ¥{profit}（目標 ¥{s['target_profit']}）で闇市場を制した。",
         f"目標未達… 最終利益 ¥{profit}（目標 ¥{s['target_profit']}）。次こそは情報収集と駆け引きを見直そう。",
     )
+
+    profit_label = f"¥{profit:,}" if profit >= 0 else f"-¥{abs(profit):,}"
+    if not s.get("best_recorded"):
+        ui.record_and_show_best(NAME, s["difficulty"], profit, profit_label)
+        s["best_recorded"] = True
+    else:
+        ui.personal_best_line(NAME, s["difficulty"])
 
     ui.metric_row(
         [

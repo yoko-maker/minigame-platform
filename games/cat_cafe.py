@@ -152,6 +152,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 50.0,
         "cats": 4,
         "cost_scale": 0.8,
+        "forecast_acc": 0.85,
         "desc": "10日・資金8,000円・猫4匹。固定費も安く、合格ラインは50点。",
     },
     "normal": {
@@ -162,6 +163,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 60.0,
         "cats": 3,
         "cost_scale": 1.0,
+        "forecast_acc": 0.72,
         "desc": "10日・資金5,000円・猫3匹。標準の経営。合格ラインは60点。",
     },
     "hard": {
@@ -172,6 +174,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 68.0,
         "cats": 3,
         "cost_scale": 1.25,
+        "forecast_acc": 0.60,
         "desc": "12日・資金3,500円・猫3匹。家賃が高く、合格ラインは68点。",
     },
     "expert": {
@@ -182,10 +185,12 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 75.0,
         "cats": 2,
         "cost_scale": 1.5,
+        "forecast_acc": 0.50,
         "desc": "14日・資金2,000円・猫2匹。猫が少なく休ませる余裕もない。合格ラインは75点。",
     },
 }
 DEFAULT_DIFFICULTY = state.DEFAULT_LEVEL
+DEFAULT_FORECAST_ACC = 0.65  # forecast_acc が未設定の難易度用のフォールバック
 
 
 def settings_for(level: str) -> dict[str, Any]:
@@ -273,6 +278,54 @@ def roll_event(rng: random.Random) -> dict[str, Any]:
         if r < cumulative:
             return dict(event)
     return dict(EVENTS[0])
+
+
+# 予報対象にできるイベント。猫の脱走(escape)は前触れのない事故なので、
+# 「当てにいく」対象からそもそも外す（外れの選択肢としても使わない）。
+FORECAST_EVENT_IDS = [e["id"] for e in EVENTS if e["id"] != "escape"]
+
+FORECAST_TEXTS: dict[str, str] = {
+    "none": "特に変わった噂は聞こえてきません。穏やかな一日になりそうです。",
+    "rain": "雲行きが怪しく、明日は雨になりそうだと近所で噂になっています。",
+    "tv": "近くでテレビカメラを見かけた、取材が入るかもという噂です。",
+    "sns": "SNSで火がつきそうな気配がする、と常連さんが話していました。",
+}
+FORECAST_NO_OMEN_TEXT = "特に気になる噂は聞こえてきません。（ただし、何が起こるかは開けてみないと分かりません）"
+
+
+def forecast(rng_seed: int, next_day: int, accuracy: float) -> dict[str, Any]:
+    """翌日の来客イベントを「街の噂」として予報する純粋関数。
+
+    実際の翌日イベントは `roll_event(random.Random(rng_seed + next_day))` で
+    決まる（`_day_rng` と同じ式）。予報の「当たり/外れ」自体も再現可能にする
+    ため、予報専用の乱数系統 `random.Random(rng_seed * 31 + next_day)` を
+    別に使う。同じ引数なら常に同じ結果を返す（決定的）。
+
+    accuracy の確率で実際のイベントをそのまま予報し（当たり）、外れた場合は
+    実際とは異なるイベントを予報する。猫の脱走(escape)には前触れがないという
+    設定のため予報の候補から外してあり、実際の翌日イベントが脱走だった日は
+    どう転んでも「当てられない」（必ず外れ扱いで、噂なしの文言にフォール
+    バックする）。
+
+    Returns:
+        {"predicted": event_id, "hit": bool, "text": str}
+    """
+    actual = roll_event(random.Random(rng_seed + next_day))
+    forecast_rng = random.Random(rng_seed * 31 + next_day)
+    roll = forecast_rng.random()
+
+    if actual["id"] == "escape":
+        # 予兆のない事故。乱数は消費しつつ、当たりようがないので必ず外れにする。
+        predicted = forecast_rng.choice(FORECAST_EVENT_IDS)
+        return {"predicted": predicted, "hit": False, "text": FORECAST_NO_OMEN_TEXT}
+
+    if roll < accuracy:
+        predicted = actual["id"]
+    else:
+        predicted = forecast_rng.choice([eid for eid in FORECAST_EVENT_IDS if eid != actual["id"]])
+
+    hit = predicted == actual["id"]
+    return {"predicted": predicted, "hit": hit, "text": FORECAST_TEXTS[predicted]}
 
 
 def cafe_appeal(cats: list[dict[str, Any]]) -> float:
@@ -685,6 +738,7 @@ def _default_state(level: str | None = None) -> dict[str, Any]:
         "last_price": PRICE_REF,
         "last_ad_level": 1,
         "bankrupt": False,
+        "best_recorded": False,
     }
 
 
@@ -737,6 +791,12 @@ def _render_cat_condition(cats: list[dict[str, Any]], resting_ids: set[int] | No
 def _render_plan(s: dict[str, Any]) -> None:
     cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
     st.subheader(f"📅 {s['day']}日目 / {s['total_days']}日 - 方針決定")
+
+    next_day = s["day"] + 1
+    if next_day <= s["total_days"]:
+        acc = cfg.get("forecast_acc", DEFAULT_FORECAST_ACC)
+        fc = forecast(s["rng_seed"], next_day, acc)
+        st.info(f"📻 開店前ニュース: {fc['text']}")
 
     cats = s["cats"]
     ui.metric_row([
@@ -966,6 +1026,14 @@ def _render_gameover(s: dict[str, Any]) -> None:
     stars_half = evaluation["stars"] - stars_full >= 0.5
     star_str = "⭐" * stars_full + ("✨" if stars_half else "")
     st.markdown(f"### 総合評価: {evaluation['score']:.1f} / 100 {star_str}")
+
+    # 自己ベストは総合評価スコアで管理する。二重記録を避けるため1回だけ試みる。
+    level = s.get("difficulty", DEFAULT_DIFFICULTY)
+    if not s.get("best_recorded"):
+        ui.record_and_show_best(NAME, level, evaluation["score"], f"{evaluation['score']:.0f} 点")
+        s["best_recorded"] = True
+    else:
+        ui.personal_best_line(NAME, level)
 
     ui.metric_row([
         ("最終資金", f"¥{int(evaluation['funds']):,}"),

@@ -49,6 +49,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "charges": 4,
         "patrols": 0,
         "items": {"emp": 3, "smoke": 3, "mirror": 3, "drone": 2},
+        "loot": 1,
         "desc": "6×6の小さな館。警備員は持ち場を動かず、道具にも余裕がある。まずはここから。",
     },
     "normal": {
@@ -60,6 +61,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "charges": 3,
         "patrols": 1,
         "items": {"emp": 2, "smoke": 2, "mirror": 2, "drone": 1},
+        "loot": 2,
         "desc": "7×7。巡回する警備員が1人。持ち場を離れて動き回る。",
     },
     "hard": {
@@ -71,6 +73,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "charges": 2,
         "patrols": 2,
         "items": {"emp": 1, "smoke": 1, "mirror": 1, "drone": 1},
+        "loot": 2,
         "desc": "8×8。巡回2人。警備が厚く道具も乏しい。通る道をよく選ぶこと。",
     },
     "expert": {
@@ -82,6 +85,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "charges": 2,
         "patrols": 3,
         "items": {"emp": 1, "smoke": 1, "mirror": 0, "drone": 0},
+        "loot": 3,
         "desc": "9×9。巡回3人。鏡もドローンも無い。館の記憶と勘だけが頼り。",
     },
 }
@@ -93,6 +97,7 @@ CELL_CAMERA = "camera"
 CELL_GUARD = "guard"
 CELL_GEM = "gem"
 CELL_EXIT = "exit"
+CELL_LOOT = "loot"
 
 CELL_ICON = {
     CELL_EMPTY: "・",
@@ -101,7 +106,16 @@ CELL_ICON = {
     CELL_GUARD: "💂",
     CELL_GEM: "💎",
     CELL_EXIT: "🚪",
+    CELL_LOOT: "🏺",
 }
+
+# 怪盗ランクの判定に使う点数配分・しきい値。
+# 全回収・低警戒・残ターン多めなら S、ぎりぎり成功なら C になるよう重み付けしている。
+RANK_LOOT_WEIGHT = 50
+RANK_TURNS_WEIGHT = 30
+RANK_ALERT_WEIGHT = 20
+RANK_THRESHOLDS = [("S", 90), ("A", 70), ("B", 50)]
+RANK_SCORE = {"S": 4, "A": 3, "B": 2, "C": 1}
 PLAYER_ICON = "🥷"
 FOG_ICON = "❔"
 PATROL_ICON = "👮"
@@ -190,6 +204,8 @@ HOW_TO_PLAY = """
 
 **その他**
 - ターン数か警戒度が上限に達すると脱出失敗。
+- 🏺美術品は寄り道して回収できる任意の獲物（取らなくても脱出はできる）。
+  脱出成功時、回収数・残ターン・最終警戒度から怪盗ランク（S/A/B/C）が付く。
 """
 
 
@@ -222,16 +238,22 @@ def reachable_cells(size: int, start: tuple[int, int]) -> set[tuple[int, int]]:
 
 
 def generate_map(
-    rng: random.Random, size: int, hazard_density: float = HAZARD_DENSITY
+    rng: random.Random,
+    size: int,
+    hazard_density: float = HAZARD_DENSITY,
+    loot_count: int = 0,
 ) -> dict[str, Any]:
     """ランダムなマップを1つ生成して返す。
 
     Args:
         size: 盤面の一辺のマス数。
         hazard_density: 1マスが障害物になる確率。難易度で変わる。
+        loot_count: 任意回収の美術品（🏺）の個数。難易度の "loot" キーで決まる。
 
-    戻り値: {"size", "grid", "start", "gem", "exit"}
-    grid[r][c] は CELL_* のいずれか。start/gem/exit は必ず到達可能。
+    戻り値: {"size", "grid", "start", "gem", "exit", "loot"}
+    grid[r][c] は CELL_* のいずれか。start/gem/exit/loot はいずれも到達可能
+    （このゲームのマップは移動を遮る壁を持たない全結線グリッドのため）。
+    "loot" は美術品を置いたマス座標のリスト（要求数に届かない場合は入るだけ）。
     """
     for _attempt in range(50):
         border_cells = [
@@ -273,9 +295,31 @@ def generate_map(
                 if rng.random() < hazard_density:
                     grid[r][c] = rng.choice(hazard_types)
 
+        # 障害物配置の後、残った空きマスへ任意回収の美術品を置く。
+        # reserved（start/exit/gem）の外・start から距離2以上・空きマスのみが対象。
+        loot_candidates = [
+            (r, c)
+            for r in range(size)
+            for c in range(size)
+            if grid[r][c] == CELL_EMPTY
+            and (r, c) not in reserved
+            and _manhattan((r, c), start) >= 2
+        ]
+        rng.shuffle(loot_candidates)
+        loot_positions = loot_candidates[: max(0, loot_count)]
+        for lr, lc in loot_positions:
+            grid[lr][lc] = CELL_LOOT
+
         reachable = reachable_cells(size, start)
         if gem in reachable and exit_pos in reachable:
-            return {"size": size, "grid": grid, "start": start, "gem": gem, "exit": exit_pos}
+            return {
+                "size": size,
+                "grid": grid,
+                "start": start,
+                "gem": gem,
+                "exit": exit_pos,
+                "loot": loot_positions,
+            }
 
     # 実質的に到達しないフォールバック（全結線グリッドのため理論上不要）。
     raise RuntimeError("到達可能なマップの生成に失敗しました。")
@@ -402,6 +446,31 @@ def lure_patrols(gs: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "message": msg}
 
 
+def mission_rank(
+    turns_used: int, max_turns: int, alert: int, loot_taken: int, loot_total: int
+) -> str:
+    """脱出成功時の「うまさ」を S/A/B/C で表す。
+
+    回収率・残ターンの余裕・最終警戒度の低さを加点し、しきい値で段階分けする。
+    美術品が無い館（loot_total == 0）では回収率を満点扱いにする（無いものは
+    採点対象にしない）。脱出成功時のみ意味を持つ加点表現であり、失敗時の
+    呼び出しは想定していない（呼び出し側は win 判定後にのみ呼ぶこと）。
+    """
+    loot_ratio = (loot_taken / loot_total) if loot_total > 0 else 1.0
+    turns_left_ratio = max(0.0, (max_turns - turns_used) / max_turns) if max_turns > 0 else 0.0
+    alert_ratio = max(0.0, min(1.0, 1 - (alert / ALERT_MAX)))
+
+    score = (
+        RANK_LOOT_WEIGHT * loot_ratio
+        + RANK_TURNS_WEIGHT * turns_left_ratio
+        + RANK_ALERT_WEIGHT * alert_ratio
+    )
+    for label, threshold in RANK_THRESHOLDS:
+        if score >= threshold:
+            return label
+    return "C"
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "phase": "trait_select",  # trait_select -> playing -> ended
@@ -417,11 +486,14 @@ def _default_state() -> dict[str, Any]:
         "has_gem": False,
         "alert": 0,
         "turns_used": 0,
+        "loot_taken": 0,
+        "loot_total": 0,
         "revealed": set(),
         "revealed_all": False,
         "log": [],
         "win": None,
         "end_reason": "",
+        "best_recorded": False,
     }
 
 
@@ -458,17 +530,20 @@ def select_trait(gs: dict[str, Any], trait_key: str, difficulty_key: str | None 
     gs["max_turns"] = diff["turns"]
 
     rng = random.Random(gs["rng_seed"])
-    gmap = generate_map(rng, diff["size"], diff["density"])
+    gmap = generate_map(rng, diff["size"], diff["density"], diff.get("loot", 0))
     gs["map"] = gmap
     gs["patrols"] = spawn_patrols(gmap, diff["patrols"], rng)
     gs["pos"] = gmap["start"]
     gs["has_gem"] = False
     gs["alert"] = 0
     gs["turns_used"] = 0
+    gs["loot_taken"] = 0
+    gs["loot_total"] = len(gmap.get("loot", []))
     gs["revealed"] = set()
     gs["revealed_all"] = False
     gs["log"] = ["潜入開始。物音を立てないように進もう。"]
     gs["phase"] = "playing"
+    gs["best_recorded"] = False
     _reveal_around(gs, gmap["start"])
 
 
@@ -613,6 +688,11 @@ def try_move(gs: dict[str, Any], direction: str) -> dict[str, Any]:
         gs["map"]["grid"][nr][nc] = CELL_EMPTY
         result["message"] = "💎 宝石を手に入れた！"
         result["event"] = "gem"
+    elif cell == CELL_LOOT:
+        gs["loot_taken"] += 1
+        gs["map"]["grid"][nr][nc] = CELL_EMPTY
+        result["message"] = f"🏺 美術品を回収した！（{gs['loot_taken']}/{gs['loot_total']}）"
+        result["event"] = "loot"
     elif cell == CELL_EXIT:
         if gs["has_gem"]:
             gs["phase"] = "ended"
@@ -746,6 +826,7 @@ def _render_playing(gs: dict[str, Any]) -> None:
             ("警戒度", f"{gs['alert']}% / {ALERT_MAX}%"),
             ("ターン", f"{gs['turns_used']}/{max_turns}"),
             ("宝石", "💎所持" if gs["has_gem"] else "未回収"),
+            ("🏺回収", f"{gs['loot_taken']}/{gs['loot_total']}"),
             ("巡回中", f"{len(gs.get('patrols', []))}人"),
             (f"{trait_info['emoji']} {trait_info['label']} 残り", gs["trait_charges"]),
         ]
@@ -756,7 +837,8 @@ def _render_playing(gs: dict[str, Any]) -> None:
     _render_grid(gs)
     st.caption(
         f"{PLAYER_ICON} あなた　・通路　🔴レーザー　📷カメラ　💂警備員（動かない）　"
-        f"{PATROL_ICON}警備員（巡回中・毎ターン動く）　💎宝石　🚪出口　{FOG_ICON}未偵察"
+        f"{PATROL_ICON}警備員（巡回中・毎ターン動く）　💎宝石　🏺美術品（任意回収）　"
+        f"🚪出口　{FOG_ICON}未偵察"
     )
     if gs.get("patrols"):
         st.caption(
@@ -835,19 +917,39 @@ def _render_playing(gs: dict[str, Any]) -> None:
 
 def _render_ended(gs: dict[str, Any]) -> None:
     win = bool(gs["win"])
+    max_turns = gs.get("max_turns", MAX_TURNS)
     ui.result_banner(
         win,
         win_msg=gs.get("end_reason") or "宝石を持って脱出に成功した！",
         lose_msg=gs.get("end_reason") or "作戦は失敗に終わった。",
     )
-    ui.metric_row(
-        [
-            ("結果", "成功" if win else "失敗"),
-            ("使用ターン", f"{gs['turns_used']}/{MAX_TURNS}"),
-            ("最終警戒度", f"{gs['alert']}%"),
-            ("宝石", "回収済み" if gs["has_gem"] else "未回収"),
-        ]
-    )
+
+    metrics = [
+        ("結果", "成功" if win else "失敗"),
+        ("使用ターン", f"{gs['turns_used']}/{max_turns}"),
+        ("最終警戒度", f"{gs['alert']}%"),
+        ("🏺回収した美術品", f"{gs['loot_taken']}/{gs['loot_total']}"),
+        ("宝石", "回収済み" if gs["has_gem"] else "未回収"),
+    ]
+
+    rank = None
+    if win:
+        rank = mission_rank(gs["turns_used"], max_turns, gs["alert"], gs["loot_taken"], gs["loot_total"])
+        metrics.append(("怪盗ランク", rank))
+    ui.metric_row(metrics)
+
+    if win and rank is not None:
+        turns_left = max_turns - gs["turns_used"]
+        value = RANK_SCORE[rank] * 100 + turns_left
+        label = f"{rank}（回収{gs['loot_taken']}/{gs['loot_total']}・残{turns_left}手）"
+        if not gs.get("best_recorded"):
+            ui.record_and_show_best(NAME, gs["difficulty"], value, label)
+            gs["best_recorded"] = True
+        else:
+            ui.personal_best_line(NAME, gs["difficulty"])
+    else:
+        ui.personal_best_line(NAME, gs["difficulty"])
+
     if st.button("🔁 もう一度挑戦する", key="mus_play_again", use_container_width=True):
         state.reset_game(NAME)
         st.rerun()

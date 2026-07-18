@@ -57,6 +57,8 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 3,
         "ai_tell": 0.75,   # AIが不自然な応答/書類不備を出す確率
         "human_tell": 0.10,
+        "check_cost": 22.5,     # 精密照会の消費秒（time の25%）
+        "check_accuracy": 0.85,  # 精密照会がAIを正しく言い当てる確率
         "desc": "5人を審査。1人90秒、質問4回。AIはあからさまに尻尾を出す。",
     },
     "normal": {
@@ -68,6 +70,8 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 3,
         "ai_tell": 0.60,
         "human_tell": 0.15,
+        "check_cost": 15.0,
+        "check_accuracy": 0.75,
         "desc": "5人を審査。1人60秒、質問3回。標準的な配属先。",
     },
     "hard": {
@@ -79,6 +83,8 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 5,
         "ai_tell": 0.48,
         "human_tell": 0.22,
+        "check_cost": 11.25,
+        "check_accuracy": 0.65,
         "desc": "7人を審査。1人45秒、質問3回。AIの偽装が巧妙になり、人間にも挙動不審が混じる。",
     },
     "expert": {
@@ -90,6 +96,8 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "win": 6,
         "ai_tell": 0.40,
         "human_tell": 0.30,
+        "check_cost": 8.75,
+        "check_accuracy": 0.55,
         "desc": "8人を審査。1人35秒、質問2回。書類も会話もほとんど当てにならない。",
     },
 }
@@ -148,6 +156,15 @@ HOBBIES = [
 
 FINGERPRINT_ANOMALIES = ["軽微な不一致あり", "読み取り不安定", "登録データと部分的に相違"]
 PHOTO_ANOMALIES = ["表情がやや不自然", "陰影の付き方に違和感", "経年変化にしては差異が大きい"]
+
+# 精密照会（セカンダリチェック）のフレーバー文言。結果そのものは deep_check() が
+# 決める。ここは「何を調べ直したか」の演出だけ。
+DEEP_CHECK_FLAVORS = [
+    "渡航記録の再照会",
+    "指紋の再スキャン",
+    "顔写真の再照合",
+    "本国データベースとの照会",
+]
 
 # 審査を行っている「今年」。生年月日から年齢を出すのに使う。
 CURRENT_YEAR = 2026
@@ -278,6 +295,12 @@ HOW_TO_PLAY = """
    語った出身地が書類の国籍と違う、語った年代が生年月日と合わない、話す滞在目的が
    ビザ種別と噛み合わない——**こうした矛盾は人間には起こりません。見つけたらAIです。**
    ただし対応する話題を質問しないと表に出ません。限られた質問をどこに使うかが鍵です。
+
+**🗂 精密照会（セカンダリチェック）**
+1人につき1回だけ、残り時間と引き換えに追加照会ができます。確度つきの
+手がかりが得られますが、これも確定情報ではありません（人間でも稀に
+「AI寄り」と誤って出ることがあります）。時間を使ってでも情報を買うか、
+それとも判断を急ぐか——立ち回りが問われます。
 
 **時間制限**
 1人あたりの持ち時間があります。残り時間がゼロになると判定できないまま見逃した
@@ -422,6 +445,64 @@ def tick_timer(s: dict[str, Any], now: float, max_step: float = MAX_TICK_STEP) -
     return float(s.get("time_left", TIME_LIMIT_SEC))
 
 
+def spend_time(s: dict[str, Any], cost: float) -> float:
+    """残り時間から cost 秒を消費し、消費後の残り秒数を返す。
+
+    `tick_timer` と同じく `s["time_left"]` を直接操作する。精密照会など
+    「時間を対価にする」アクションから呼ばれる。0未満にはならない。
+    """
+    s["time_left"] = max(0.0, float(s.get("time_left", 0.0)) - max(0.0, cost))
+    return float(s["time_left"])
+
+
+def deep_check(
+    arrival: dict[str, Any],
+    rng: random.Random,
+    ai_tell: float = 0.60,
+    human_tell: float = 0.15,
+    accuracy: float = 0.75,
+) -> dict[str, Any]:
+    """精密照会（セカンダリチェック）の結果を1件返す。
+
+    書類×会話の矛盾のような「確実な証拠」とは違い、あくまで確度つきの
+    手がかりを返す純粋関数。AI は `accuracy` の確率で「ai寄り」の反応が出るが、
+    人間側にも `human_tell` を土台にした確率で誤検知（ai寄りに出る）が起きるため、
+    これ単体で確定情報にはならない。
+
+    Args:
+        accuracy: 対象が AI のとき「ai寄り」の反応が出る確率（難易度の check_accuracy）。
+
+    Returns:
+        {"text": 照会結果の表示文, "signal": "ai寄り"|"人間寄り"|"不明",
+         "confidence": "低"|"中"|"高"}
+    """
+    is_ai = arrival["is_ai"]
+    flavor = rng.choice(DEEP_CHECK_FLAVORS)
+
+    # 人間側の誤検知率。human_tell を土台にしつつ、accuracy が低い（＝難しい
+    # 難易度）ほど誤検知も増えるようにして、高難易度で照会の価値が下がるようにする。
+    false_positive = min(0.45, human_tell + (1.0 - accuracy) * 0.3)
+    hit_prob = accuracy if is_ai else false_positive
+
+    if rng.random() < hit_prob:
+        signal = "ai寄り"
+    else:
+        # 外れても即座に逆と分かるわけではなく、「不明」に割れることもある。
+        signal = "不明" if rng.random() < 0.35 else "人間寄り"
+
+    matched = (signal == "ai寄り") == is_ai
+    conf_roll = rng.random()
+    if signal == "不明":
+        confidence = "低"
+    elif matched:
+        confidence = "高" if conf_roll < 0.65 else "中"
+    else:
+        confidence = "中" if conf_roll < 0.4 else "低"
+
+    text = f"🗂 {flavor}の結果、**{signal}**の反応（確度：{confidence}）。"
+    return {"text": text, "signal": signal, "confidence": confidence}
+
+
 # ---------------------------------------------------------------------------
 # state 初期化・遷移ヘルパー（st.session_state を扱う非純粋関数）
 # ---------------------------------------------------------------------------
@@ -444,6 +525,9 @@ def _default_state() -> dict[str, Any]:
         "time_left": TIME_LIMIT_SEC,
         "last_tick": None,        # 直近に時計を刻んだ時刻（未開始は None）
         "timeouts": 0,            # 時間切れで見逃した人数
+        "deep_check_used": False,   # この入国者に精密照会を使ったか（1人1回）
+        "deep_check_result": None,  # 直近の精密照会結果 dict or None
+        "best_recorded": False,     # ゲーム終了時の自己ベスト記録が済んだか
     }
 
 
@@ -459,6 +543,8 @@ def _start_next_arrival(s: dict[str, Any]) -> None:
     s["phase"] = "asking"
     s["time_left"] = cfg["time"]
     s["last_tick"] = None
+    s["deep_check_used"] = False
+    s["deep_check_result"] = None
 
 
 def _ask(s: dict[str, Any], arrival: dict[str, Any], topic: str) -> None:
@@ -470,6 +556,27 @@ def _ask(s: dict[str, Any], arrival: dict[str, Any], topic: str) -> None:
     s["log"].append((TOPIC_LABELS[topic], answer))
     s["asked_topics"].append(topic)
     s["questions_left"] -= 1
+
+
+def _deep_check(s: dict[str, Any], arrival: dict[str, Any]) -> None:
+    """精密照会を実行する。1人1回、残り時間を対価に取る。
+
+    照会の結果、残り時間が0になった場合はそのまま既存の _timeout() に
+    つなぎ、通常の時間切れと同じ扱い（不正解・見逃し）にする。
+    """
+    if s.get("deep_check_used") or s["phase"] != "asking":
+        return
+    cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
+    cost = cfg.get("check_cost", cfg["time"] * 0.25)
+    accuracy = cfg.get("check_accuracy", 0.70)
+    # _ask (係数31/977/13) や generate_arrival 用の乱数(係数1_000_003/97)と
+    # 衝突しない専用の係数を使う。
+    rng = random.Random(s["seed"] * 524_287 + arrival["id"] * 131 + 7)
+    s["deep_check_result"] = deep_check(arrival, rng, cfg["ai_tell"], cfg["human_tell"], accuracy)
+    s["deep_check_used"] = True
+    spend_time(s, cost)
+    if s["time_left"] <= 0 and s["phase"] == "asking":
+        _timeout(s)
 
 
 def _submit_guess(s: dict[str, Any], arrival: dict[str, Any], guess_is_ai: bool) -> None:
@@ -571,6 +678,12 @@ def _render_conversation_log(s: dict[str, Any]) -> None:
 def _render_actions(s: dict[str, Any], arrival: dict[str, Any]) -> None:
     st.subheader("🔎 尋問 / 判定")
 
+    check_result = s.get("deep_check_result")
+    if check_result:
+        conf_icon = {"高": "🔴", "中": "🟡", "低": "⚪"}.get(check_result["confidence"], "⚪")
+        st.info(f"{conf_icon} {check_result['text']}")
+        st.caption("精密照会の結果もあくまで手がかりの一つ。確実な証拠は書類×会話の矛盾のみ。")
+
     if s["phase"] == "asking":
         st.caption(f"残り質問回数：{s['questions_left']} 回　/　持ち時間内に判定すること")
         for topic in TOPICS:
@@ -581,6 +694,17 @@ def _render_actions(s: dict[str, Any], arrival: dict[str, Any]) -> None:
             if st.button(btn_label, key=f"imm_ask_{topic}", disabled=disabled, use_container_width=True):
                 _ask(s, arrival, topic)
                 st.rerun()
+
+        st.divider()
+        cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
+        check_cost = cfg.get("check_cost", cfg["time"] * 0.25)
+        check_used = s.get("deep_check_used", False)
+        check_disabled = check_used or s["time_left"] < check_cost
+        check_label = f"🗂 精密照会（−{check_cost:.0f}秒 / 1人1回）" + ("（済）" if check_used else "")
+        if st.button(check_label, key="imm_deep_check", disabled=check_disabled, use_container_width=True):
+            _deep_check(s, arrival)
+            st.rerun()
+        st.caption("残り時間を対価に、確度つきの追加の手がかりを1回だけ得られます。")
 
         st.divider()
         st.write("この入国者は AI だと思いますか？")
@@ -637,6 +761,15 @@ def _render_game_over(s: dict[str, Any]) -> None:
             f"⏱️ {s['timeouts']} 人は時間内に判定できず見逃しました。"
             "書類の矛盾は一目で分かるものから当たると速く捌けます。"
         )
+
+    # 自己ベスト（正解数）。二重記録を防ぐため、この結果画面で一度だけ記録する。
+    best_label = f"{s['score']} / {cfg['arrivals']} 人"
+    if not s.get("best_recorded"):
+        ui.record_and_show_best(NAME, s.get("difficulty", DEFAULT_DIFFICULTY), s["score"], best_label)
+        s["best_recorded"] = True
+    else:
+        ui.personal_best_line(NAME, s.get("difficulty", DEFAULT_DIFFICULTY))
+
     win = s["score"] >= cfg["win"]
     ui.result_banner(
         win,
