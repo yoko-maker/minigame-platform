@@ -76,6 +76,12 @@ def render_home() -> None:
                 if st.button("▶ プレイ", key=f"play_{gid}", use_container_width=True):
                     state.go_to(gid)
 
+    # 総アクセス数（計測できていれば控えめに表示。取れなければ何も出さない）。
+    total = analytics.total_visits()
+    if total is not None:
+        st.divider()
+        st.caption(f"👣 これまでのアクセス: {total:,}")
+
 
 def main() -> None:
     st.set_page_config(
