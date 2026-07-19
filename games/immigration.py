@@ -396,28 +396,104 @@ def answer_question(
     rng: random.Random,
     ai_tell: float = 0.60,
     human_tell: float = 0.15,
-) -> str:
-    """入国者への質問(topic)に対する応答文を生成する。
+) -> dict[str, Any]:
+    """入国者への質問(topic)に対する応答を生成する。
 
     2種類の手がかりが出る。
 
     1. 口調の不自然さ … AI で出やすいが人間でも稀に出る。曖昧な手がかり。
     2. 書類との食い違い … その話題に矛盾が仕込まれていれば必ず出る。確実な証拠。
        口調はあくまで自然なので、書類を見比べないと気づけない。
+
+    Returns:
+        {"text": 応答文,
+         "tell": "natural"|"unnatural"|"contradiction",  # この受け答えが示す手がかり
+         "cross": {"doc": 書類項目, "hint": 説明} または None}
     """
     if topic not in RESPONSE_TEMPLATES:
         raise ValueError(f"unknown topic: {topic}")
 
     cross = arrival.get("contradiction")
     if cross and CROSS_CONTRADICTIONS[cross]["topic"] == topic:
+        info = CROSS_CONTRADICTIONS[cross]
         template = rng.choice(CROSS_TEMPLATES[cross])
-        return template.format(**arrival.get("cross_payload", {}))
+        text = template.format(**arrival.get("cross_payload", {}))
+        return {"text": text, "tell": "contradiction",
+                "cross": {"doc": info["doc"], "hint": info["hint"]}}
 
     is_ai = arrival["is_ai"]
     natural_prob = (1.0 - ai_tell) if is_ai else (1.0 - human_tell)
     category = "natural" if rng.random() < natural_prob else "unnatural"
     template = rng.choice(RESPONSE_TEMPLATES[topic][category])
-    return template.format(hobby=arrival.get("hobby_seed", "読書"))
+    text = template.format(hobby=arrival.get("hobby_seed", "読書"))
+    return {"text": text, "tell": category, "cross": None}
+
+
+# 受け答えの手がかり(tell)ごとの、審査官向けの一言解説。
+TELL_LABEL = {
+    "natural": ("🧑", "自然な受け答え", "人間らしい話し方だった（AIでも稀に出る）"),
+    "unnatural": ("🤖", "機械的な受け答え", "言い回しがぎこちなく、AIを疑う手がかり"),
+    "contradiction": ("❗", "書類と食い違う受け答え", "人間には起きない矛盾。AI確定級の証拠"),
+}
+
+
+def explain_result(arrival: dict[str, Any], log: list[dict[str, Any]],
+                   deep_check_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    """判定後の「なぜAI/人間だったか」を組み立てる純粋関数。
+
+    実際の生成過程（受け答えの tell・書類照合の異常・仕込まれた矛盾・精密照会）を
+    根拠として列挙する。人間なのに異常が出ていた場合は「紛らわしかった点」も示す。
+
+    Returns:
+        {"verdict": "AI"|"人間",
+         "per_question": [(絵文字, ラベル, 説明, 質問ラベル, 応答文), ...],
+         "ai_evidence": [str, ...],     # AIを示す手がかり
+         "human_evidence": [str, ...],  # 人間を示す手がかり
+         "note": str}                   # 見落としやすい点など
+    """
+    is_ai = arrival["is_ai"]
+    per_question = []
+    ai_evidence: list[str] = []
+    human_evidence: list[str] = []
+
+    for e in log:
+        emoji, label, desc = TELL_LABEL[e["tell"]]
+        per_question.append((emoji, label, desc, e["label"], e["text"]))
+        if e["tell"] == "unnatural":
+            ai_evidence.append(f"「{e['label']}」の受け答えが機械的だった")
+        elif e["tell"] == "contradiction":
+            doc = e["cross"]["doc"] if e.get("cross") else "書類"
+            ai_evidence.append(f"「{e['label']}」で書類の「{doc}」と食い違った（人間には起きない矛盾）")
+        else:
+            human_evidence.append(f"「{e['label']}」の受け答えは自然だった")
+
+    # 書類照合の異常も手がかり（AIで出やすいが人間にも紛れる）
+    if arrival.get("fingerprint_note", "一致") != "一致":
+        ai_evidence.append(f"指紋照合に異常（{arrival['fingerprint_note']}）")
+    if arrival.get("photo_note", "一致") != "一致":
+        ai_evidence.append(f"顔写真照合に異常（{arrival['photo_note']}）")
+
+    if deep_check_result:
+        sig = deep_check_result.get("signal")
+        if sig == "ai寄り":
+            ai_evidence.append(f"精密照会が「ai寄り」（確度：{deep_check_result.get('confidence')}）")
+        elif sig == "人間寄り":
+            human_evidence.append(f"精密照会が「人間寄り」（確度：{deep_check_result.get('confidence')}）")
+
+    verdict = "AI" if is_ai else "人間"
+    if is_ai:
+        note = "" if ai_evidence else "今回は目立った尻尾を出さない巧妙なAIでした。"
+    else:
+        # 人間なのにAIっぽい異常が出ていた＝紛らわしい赤ニシン
+        note = ("人間でも稀に不自然な受け答えや照合の異常が出ます。"
+                if ai_evidence else "どの手がかりも人間を指していました。")
+    return {
+        "verdict": verdict,
+        "per_question": per_question,
+        "ai_evidence": ai_evidence,
+        "human_evidence": human_evidence,
+        "note": note,
+    }
 
 
 def judge(arrival: dict[str, Any], guess_is_ai: bool) -> bool:
@@ -552,8 +628,14 @@ def _ask(s: dict[str, Any], arrival: dict[str, Any], topic: str) -> None:
     topic_idx = TOPICS.index(topic)
     ask_count = len(s["asked_topics"])
     rng = random.Random(s["seed"] * 31 + arrival["id"] * 977 + topic_idx * 13 + ask_count)
-    answer = answer_question(arrival, topic, rng, cfg["ai_tell"], cfg["human_tell"])
-    s["log"].append((TOPIC_LABELS[topic], answer))
+    ans = answer_question(arrival, topic, rng, cfg["ai_tell"], cfg["human_tell"])
+    s["log"].append({
+        "topic": topic,
+        "label": TOPIC_LABELS[topic],
+        "text": ans["text"],
+        "tell": ans["tell"],
+        "cross": ans["cross"],
+    })
     s["asked_topics"].append(topic)
     s["questions_left"] -= 1
 
@@ -669,9 +751,14 @@ def _render_conversation_log(s: dict[str, Any]) -> None:
     if not s["log"]:
         st.caption("まだ質問していません。右側のボタンから質問してください。")
         return
-    for topic_label, answer in s["log"]:
-        st.markdown(f"**Q. {topic_label}**")
-        st.write(answer)
+    # 判定後は各受け答えが何を示していたかの注釈を付ける（審査中は伏せる）。
+    reveal = s["phase"] == "result"
+    for e in s["log"]:
+        st.markdown(f"**Q. {e['label']}**")
+        st.write(e["text"])
+        if reveal:
+            emoji, label, desc = TELL_LABEL[e["tell"]]
+            st.caption(f"{emoji} {label} … {desc}")
         st.write("")
 
 
@@ -730,18 +817,39 @@ def _render_actions(s: dict[str, Any], arrival: dict[str, Any]) -> None:
         else:
             st.error(f"不正解…。この入国者の正体は **{truth_label}** でした。")
 
-        # 仕込まれていた矛盾を種明かしする。次の審査で「どこを見るか」の学習材料。
+        # 「なぜAI/人間だったか」を根拠つきで種明かしする。
+        ex = explain_result(arrival, s["log"], s.get("deep_check_result"))
+        verdict = ex["verdict"]
+
+        st.markdown(f"#### 🔍 なぜ **{verdict}** だったか")
+        if verdict == "AI":
+            if ex["ai_evidence"]:
+                st.markdown("**AIを示していた手がかり:**")
+                for ev in ex["ai_evidence"]:
+                    st.markdown(f"- {ev}")
+            if ex["human_evidence"]:
+                st.caption("紛らわしかった点（AIでも自然に答えることがあります）: "
+                           + " / ".join(ex["human_evidence"]))
+        else:
+            if ex["human_evidence"]:
+                st.markdown("**人間を示していた手がかり:**")
+                for ev in ex["human_evidence"]:
+                    st.markdown(f"- {ev}")
+            if ex["ai_evidence"]:
+                st.markdown("**⚠️ AIと紛らわしかった点（実は人間でした）:**")
+                for ev in ex["ai_evidence"]:
+                    st.markdown(f"- {ev}")
+        if ex["note"]:
+            st.caption(ex["note"])
+
+        # 質問しなかった話題に矛盾が眠っていた場合は、その学びも添える。
         cross = arrival.get("contradiction")
-        if cross:
+        if cross and CROSS_CONTRADICTIONS[cross]["topic"] not in s["asked_topics"]:
             info = CROSS_CONTRADICTIONS[cross]
-            asked = info["topic"] in s["asked_topics"]
-            if asked:
-                st.info(f"🔍 この入国者には矛盾がありました：{info['hint']}（書類の「{info['doc']}」）")
-            else:
-                st.info(
-                    f"🔍 実は「{TOPIC_LABELS[info['topic']]}」を聞いていれば、"
-                    f"{info['hint']}ことに気づけました（書類の「{info['doc']}」）。"
-                )
+            st.info(
+                f"💡 実は「{TOPIC_LABELS[info['topic']]}」を聞いていれば、"
+                f"{info['hint']}ことに気づけました（書類の「{info['doc']}」）。"
+            )
 
         if st.button("次の入国者へ ▶", key="imm_next", use_container_width=True):
             _advance(s)

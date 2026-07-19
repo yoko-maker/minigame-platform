@@ -60,8 +60,14 @@ AD_COSTS = [0, 700, 1600, 3000]
 AD_LABELS = ["投資しない", "軽め", "普通", "積極的"]
 
 FACILITY_MAX = 3
-FACILITY_UPGRADE_COSTS = [1500, 2800, 4200]  # index = 現在のレベル
+FACILITY_UPGRADE_COSTS = [1500, 2800, 4200]  # index = 現在のレベル → 次へ上げる費用
 FACILITY_LABELS = ["簡素", "標準", "快適", "豪華"]
+
+
+def facility_upgrade_cost(current: int, target: int) -> int:
+    """設備を current から target まで一気に上げる累計費用。"""
+    target = max(current, min(target, FACILITY_MAX))
+    return sum(FACILITY_UPGRADE_COSTS[current:target])
 
 # 客層: 価格感度が高いほど値上げで来店確率が下がりやすい。
 # 広告感度が高いほど広告投資の効果を受けやすい。
@@ -381,7 +387,15 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     price = settings["price"]
     ad_level = settings["ad_level"]
     resting_ids = set(settings.get("resting", []))
-    invest_equipment = settings["invest_equipment"] and facility_level < FACILITY_MAX
+    # 設備投資は「目標レベル」で指定する。1日で複数段階上げてもよい。
+    # 後方互換: 旧来の invest_equipment(bool) が来た場合は1段階アップと解釈する。
+    if "target_facility" in settings:
+        target_facility = int(settings["target_facility"])
+    elif settings.get("invest_equipment"):
+        target_facility = facility_level + 1
+    else:
+        target_facility = facility_level
+    target_facility = max(facility_level, min(target_facility, FACILITY_MAX))
 
     working = [c for c in cats if c["id"] not in resting_ids]
     resting = [c for c in cats if c["id"] in resting_ids]
@@ -389,9 +403,10 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
 
     event = roll_event(rng)
 
-    # --- 設備投資 ---
-    equipment_cost = FACILITY_UPGRADE_COSTS[facility_level] if invest_equipment else 0
-    new_facility_level = facility_level + 1 if invest_equipment else facility_level
+    # --- 設備投資（目標レベルまで一気に上げる） ---
+    equipment_cost = facility_upgrade_cost(facility_level, target_facility)
+    new_facility_level = target_facility
+    invest_equipment = target_facility > facility_level
 
     # --- 来客数（客層ごと） ---
     segment_visitors: dict[str, int] = {seg["key"]: 0 for seg in SEGMENTS}
@@ -918,15 +933,35 @@ def _render_plan(s: dict[str, Any]) -> None:
             ):
                 resting.append(c["id"])
 
-        if s["facility_level"] < FACILITY_MAX:
-            cost = FACILITY_UPGRADE_COSTS[s["facility_level"]]
-            invest_equipment = st.checkbox(
-                f"🛠️ 設備投資する（¥{cost:,} → {FACILITY_LABELS[s['facility_level'] + 1]}）",
-                key="cc_invest_equipment",
+        cur = s["facility_level"]
+        st.markdown("**🛠️ 設備投資**")
+        if cur < FACILITY_MAX:
+            # 現状維持〜最大まで、どのレベルまで上げるかを選べる（1日で複数段も可）。
+            options = list(range(cur, FACILITY_MAX + 1))
+
+            def _fac_label(lv: int) -> str:
+                if lv == cur:
+                    return f"現状維持（{FACILITY_LABELS[cur]}）"
+                total = facility_upgrade_cost(cur, lv)
+                return f"{FACILITY_LABELS[lv]} まで（累計 ¥{total:,}）"
+
+            target_facility = st.selectbox(
+                "どのレベルまで上げるか",
+                options=options,
+                index=0,
+                format_func=_fac_label,
+                key="cc_facility_target",
+                label_visibility="collapsed",
             )
+            if target_facility > cur:
+                st.caption(
+                    f"{FACILITY_LABELS[cur]} → {FACILITY_LABELS[target_facility]}："
+                    f"¥{facility_upgrade_cost(cur, target_facility):,}。"
+                    "設備が良いほど猫の疲労が溜まりにくく、満足度も上がります。"
+                )
         else:
-            st.caption("🛠️ 設備は最大レベルです。")
-            invest_equipment = False
+            st.caption("設備は最大レベル（豪華）です。")
+            target_facility = cur
 
     _render_cat_condition(cats, set(resting))
 
@@ -938,7 +973,7 @@ def _render_plan(s: dict[str, Any]) -> None:
             "price": price,
             "ad_level": ad_level,
             "resting": resting,
-            "invest_equipment": invest_equipment,
+            "target_facility": target_facility,
         }
         gamestate = {
             "funds": s["funds"],
@@ -1037,7 +1072,10 @@ def _render_result(s: dict[str, Any]) -> None:
     st.markdown(f"**資金**: ¥{int(result['gamestate']['funds']):,}")
 
     if result["equipment_invested"]:
-        st.caption(f"🛠️ 設備をレベル {s['facility_level']} にアップグレードしました。")
+        st.caption(
+            f"🛠️ 設備を **{FACILITY_LABELS[s['facility_level']]}**"
+            f"（レベル {s['facility_level']} / {FACILITY_MAX}）にアップグレードしました。"
+        )
 
     if result["bankrupt"]:
         reason = result.get("bankrupt_reason") or "経営が立ち行かなくなりました"
