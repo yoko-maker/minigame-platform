@@ -56,8 +56,35 @@ CAT_STAT_MAX = 100
 CAT_MOOD_GOOD = 70      # これ以上なら機嫌が良いと言える
 CAT_FATIGUE_WARN = 75   # これを超えると機嫌が下がり始める（simulate_day と対応）
 
-AD_COSTS = [0, 700, 1600, 3000]
-AD_LABELS = ["投資しない", "軽め", "普通", "積極的"]
+# 広告費は入場料と同じ50円単位で選ぶ。効果は下のアンカー点を折れ線で補間し、
+# 旧4段階（¥0/700/1600/3000 → 集客係数 0/0.15/0.30/0.45）と同じバランスを保つ。
+AD_MIN = 0
+AD_MAX = 3000
+AD_STEP = 50
+# (広告費, 集客係数) のアンカー。この間は線形に補間する。
+AD_ANCHORS = [(0, 0.0), (700, 0.15), (1600, 0.30), (3000, 0.45)]
+
+
+def ad_effect(budget: float) -> float:
+    """広告費から集客係数を返す（アンカー点を折れ線補間）。"""
+    b = max(AD_MIN, min(budget, AD_MAX))
+    for (x0, y0), (x1, y1) in zip(AD_ANCHORS, AD_ANCHORS[1:]):
+        if b <= x1:
+            return y0 + (y1 - y0) * (b - x0) / (x1 - x0)
+    return AD_ANCHORS[-1][1]
+
+
+def ad_word(budget: float) -> str:
+    """広告費の目安を日本語一言で（スライダーの補助表示用）。"""
+    if budget <= 0:
+        return "投資しない"
+    if budget < 700:
+        return "ひかえめ"
+    if budget < 1600:
+        return "軽め"
+    if budget < 3000:
+        return "普通"
+    return "積極的"
 
 FACILITY_MAX = 3
 FACILITY_UPGRADE_COSTS = [1500, 2800, 4200]  # index = 現在のレベル → 次へ上げる費用
@@ -368,8 +395,8 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         gamestate: {"funds": float, "reputation": float,
                      "cats": [{"id","name","breed","mood","fatigue","popularity"}, ...],
                      "facility_level": int, "cost_scale": float}
-        settings: {"price": int, "ad_level": int(0-3),
-                    "resting": [猫のid], "invest_equipment": bool}
+        settings: {"price": int, "ad_budget": int(0-3000, 50円単位),
+                    "resting": [猫のid], "target_facility": int}
         rng: 日ごとに固定される random.Random インスタンス。
 
     Returns:
@@ -385,7 +412,13 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     deficit_streak = gamestate.get("deficit_streak", 0)
 
     price = settings["price"]
-    ad_level = settings["ad_level"]
+    # 広告は50円単位の予算(ad_budget)で指定する。
+    # 後方互換: 旧来の ad_level(0-3) が来た場合は旧アンカーの金額に読み替える。
+    if "ad_budget" in settings:
+        ad_budget = int(settings["ad_budget"])
+    else:
+        ad_budget = AD_ANCHORS[int(settings.get("ad_level", 1))][0]
+    ad_budget = max(AD_MIN, min(ad_budget, AD_MAX))
     resting_ids = set(settings.get("resting", []))
     # 設備投資は「目標レベル」で指定する。1日で複数段階上げてもよい。
     # 後方互換: 旧来の invest_equipment(bool) が来た場合は1段階アップと解釈する。
@@ -421,7 +454,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         for seg in SEGMENTS:
             price_ratio_excess = (price - PRICE_REF) / PRICE_REF
             price_mult = _clamp(1 - seg["price_sensitivity"] * price_ratio_excess, 0.15, 1.8)
-            ad_mult = 1 + ad_level * 0.15 * seg["ad_sensitivity"]
+            ad_mult = 1 + ad_effect(ad_budget) * seg["ad_sensitivity"]
 
             mean_visitors = (
                 seg["base_visitors"] * price_mult * ad_mult * popularity_mult
@@ -439,7 +472,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     # 猫の世話代は頭数ぶんかかる。多く飼うほど固定費が重い。
     care_cost = round(CAT_CARE_COST * len(cats) / 3 * cost_scale)
     base_cost = round(BASE_DAILY_COST * cost_scale)
-    cost = base_cost + AD_COSTS[ad_level] + care_cost + event["extra_cost"] + equipment_cost
+    cost = base_cost + ad_budget + care_cost + event["extra_cost"] + equipment_cost
     profit = revenue - cost
     new_funds = funds + profit
 
@@ -516,6 +549,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     result: dict[str, Any] = {
         "event": event,
         "settings": dict(settings),
+        "ad_budget": ad_budget,
         "closed": closed,
         "segment_visitors": segment_visitors,
         "total_visitors": total_visitors,
@@ -524,7 +558,7 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         "cost": cost,
         "cost_breakdown": {
             "base": base_cost,
-            "ad": AD_COSTS[ad_level],
+            "ad": ad_budget,
             "cat_care": care_cost,
             "event": event["extra_cost"],
             "equipment": equipment_cost,
@@ -574,7 +608,7 @@ def customer_voices(
     worked = [c for c in cats if c["id"] in result["worked"]]
     event = result["event"]
     price = settings["price"]
-    ad_level = settings["ad_level"]
+    ad_budget = result.get("ad_budget", 0)
     facility = result["gamestate"]["facility_level"]
     visitors = result["total_visitors"]
 
@@ -690,13 +724,13 @@ def customer_voices(
             "tone": "good",
         }))
 
-    if ad_level == 0:
+    if ad_budget <= 0:
         candidates.append((7, {
             "who": "🧳 観光客",
             "text": "こんなお店があるの、知りませんでした。たまたま通りかかって。",
             "tone": "bad",
         }))
-    elif ad_level >= 2:
+    elif ad_budget >= 1600:
         candidates.append((3, {
             "who": "🎒 学生",
             "text": "広告を見て来ました！ずっと気になってたんです。",
@@ -789,7 +823,7 @@ def _default_state(level: str | None = None) -> dict[str, Any]:
         "history": [],
         "pending_result": None,
         "last_price": PRICE_REF,
-        "last_ad_level": 1,
+        "last_ad_budget": 700,
         "bankrupt": False,
         "best_recorded": False,
     }
@@ -915,12 +949,11 @@ def _render_plan(s: dict[str, Any]) -> None:
             "価格（1人あたり・円）", min_value=PRICE_MIN, max_value=PRICE_MAX,
             value=int(s.get("last_price", PRICE_REF)), step=PRICE_STEP, key="cc_price",
         )
-        ad_level = st.select_slider(
-            "広告投資", options=[0, 1, 2, 3],
-            value=s.get("last_ad_level", 1),
-            format_func=lambda x: f"{AD_LABELS[x]}（¥{AD_COSTS[x]:,}）",
-            key="cc_ad_level",
+        ad_budget = st.slider(
+            "広告費（円）", min_value=AD_MIN, max_value=AD_MAX,
+            value=int(s.get("last_ad_budget", 700)), step=AD_STEP, key="cc_ad_budget",
         )
+        st.caption(f"広告費 ¥{ad_budget:,}（{ad_word(ad_budget)}）。高いほど集客が増えます。")
     with col2:
         st.markdown("**😴 今日休ませる猫**")
         st.caption("休ませると疲労が大きく回復しますが、その子目当ての客は来ません。全員休ませると休業日になります。")
@@ -971,7 +1004,7 @@ def _render_plan(s: dict[str, Any]) -> None:
     if st.button("☕ 営業開始", key="cc_start_day", type="primary", use_container_width=True):
         settings = {
             "price": price,
-            "ad_level": ad_level,
+            "ad_budget": ad_budget,
             "resting": resting,
             "target_facility": target_facility,
         }
@@ -995,7 +1028,7 @@ def _render_plan(s: dict[str, Any]) -> None:
         s["pending_result"] = result
         s["bankrupt"] = result["bankrupt"]
         s["last_price"] = price
-        s["last_ad_level"] = ad_level
+        s["last_ad_budget"] = ad_budget
         s["history"].append({
             "日": s["day"],
             "イベント": result["event"]["label"],
