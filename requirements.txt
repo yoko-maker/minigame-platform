@@ -1,3 +1,9 @@
 # utils/theme.py の CSS は Streamlit の data-testid（stIconMaterial 等）に依存するため、
 # 古いバージョンでは見た目が崩れる。動作確認は 1.59.2 で行っている。
 streamlit>=1.59
+
+# アクセス数の計測（Google スプレッドシートへの追記）。
+# secrets が未設定なら utils/analytics.py が静かにスキップするため、
+# これらが入っていてもアプリの起動には影響しない。
+gspread>=6.0
+google-auth>=2.28

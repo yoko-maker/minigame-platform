@@ -12,7 +12,7 @@ from typing import Callable
 import streamlit as st
 import streamlit.components.v1 as components
 
-from . import state, theme
+from . import state, theme, analytics
 
 
 def game_header(title: str, game_name: str, how_to_play: str | None = None) -> None:
@@ -254,6 +254,7 @@ def briefing(game_key: str, how_to_play: str, difficulties: dict | None = None) 
         st.write("")
         if st.button("▶ ゲームを始める", key=f"start_{game_key}", type="primary", use_container_width=True):
             state.mark_started(game_key)
+            analytics.record_play(game_key)  # ゲーム開始を記録（未設定なら無視）
             state.request_scroll_top()
             st.rerun()
         if st.button("← ゲーム一覧に戻る", key=f"briefing_back_{game_key}", use_container_width=True):

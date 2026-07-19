@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from utils import state, theme, ui
+from utils import state, theme, ui, analytics
 from games import immigration, black_market, museum, cat_cafe
 
 # ページ識別子 -> ゲームモジュール（render() と HOW_TO_PLAY を持つ）
@@ -84,6 +84,8 @@ def main() -> None:
         layout="wide",
     )
     state.init_state()
+    # このセッションを1アクセスとして記録する（未設定なら静かにスキップ）。
+    analytics.record_visit()
 
     page = st.session_state.current_page
     if page not in GAME_MODULES:
