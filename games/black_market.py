@@ -46,6 +46,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "target": 200,
         "rival_boost": 0.45,   # 相手の入札上限にかかる倍率（小さいほど降りやすい）
         "info_scale": 0.5,     # 情報の値段の倍率
+        "collector_budget": 350,  # コレクターの財布の上限。高額品で粘りすぎるのを抑える
         "desc": "資金1,600円で5品。相手は弱気で情報も安い。目標は+200円。まずはここから。",
     },
     "normal": {
@@ -56,6 +57,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "target": 250,
         "rival_boost": 0.52,
         "info_scale": 0.7,
+        "collector_budget": 450,
         "desc": "資金1,200円で5品。標準の卓。目標は+250円。払いすぎに注意。",
     },
     "hard": {
@@ -66,6 +68,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "target": 350,
         "rival_boost": 0.56,
         "info_scale": 0.9,
+        "collector_budget": 550,
         "desc": "資金1,000円で6品。相手が強気になり情報も高い。目標は+350円。",
     },
     "expert": {
@@ -76,6 +79,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "target": 400,
         "rival_boost": 0.60,
         "info_scale": 1.1,
+        "collector_budget": 650,
         "desc": "資金800円で6品。相手は上限まで食い下がる。情報の使いどころが勝負。目標は+400円。",
     },
 }
@@ -319,14 +323,25 @@ def settle(won: bool, price_paid: int, true_value: int, info_cost_total: int) ->
 # ---------------------------------------------------------------------------
 
 def create_rivals(
-    item: dict[str, Any], rng: random.Random, boost: float = 1.0
+    item: dict[str, Any],
+    rng: random.Random,
+    boost: float = 1.0,
+    caps: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """その商品に対する3体の競争相手を作る。上限は各自の胸の内（非公開）。"""
+    """その商品に対する3体の競争相手を作る。上限は各自の胸の内（非公開）。
+
+    caps は「性格キー -> 財布の上限額」。指定があれば、その相手の入札上限を
+    財布の範囲に抑える（高額品でいくらでも粘るのを防ぐ）。
+    """
+    caps = caps or {}
     rivals = []
     for key in PERSONALITIES:
+        ceiling = compute_ai_ceiling(item, key, rng, boost)
+        if key in caps:
+            ceiling = min(ceiling, caps[key])
         rivals.append({
             "key": key,
-            "ceiling": compute_ai_ceiling(item, key, rng, boost),
+            "ceiling": ceiling,
             "folded": False,
         })
     return rivals
@@ -437,7 +452,8 @@ def _start_round(s: dict[str, Any]) -> None:
     rng: random.Random = s["rng"]
     cfg = settings_for(s.get("difficulty", DEFAULT_DIFFICULTY))
     s["current_item"] = generate_item(rng)
-    s["rivals"] = create_rivals(s["current_item"], rng, cfg["rival_boost"])
+    caps = {"collector": cfg["collector_budget"]} if "collector_budget" in cfg else None
+    s["rivals"] = create_rivals(s["current_item"], rng, cfg["rival_boost"], caps)
     s["info_bought"] = {}
     s["info_cost_total"] = 0
     s["round_phase"] = "shop"
