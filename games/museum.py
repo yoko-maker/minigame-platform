@@ -121,8 +121,9 @@ FOG_ICON = "❔"
 PATROL_ICON = "👮"
 
 # 巡回する警備員。持ち場に立つ 💂 と違い、毎ターン1歩動く。
-PATROL_DETECT = 2   # この距離まで近づかれると、こちらへ寄ってくる
-PATROL_LURE_PUSH = 3  # 幻術師の幻影で引き離せる距離
+PATROL_DETECT = 1        # この距離まで近づかれると、こちらへ寄ってくる（隣接のみ）
+PATROL_LOSE_CHANCE = 0.4  # 追跡中でもこの確率で見失い、その手番は巡回に戻る
+PATROL_LURE_PUSH = 3      # 幻術師の幻影で引き離せる距離
 
 HAZARD_LABELS = {CELL_LASER: "レーザー", CELL_CAMERA: "監視カメラ", CELL_GUARD: "警備員"}
 ALERT_GAIN = {CELL_LASER: 30, CELL_CAMERA: 25}
@@ -202,9 +203,10 @@ HOW_TO_PLAY = """
 **障害物**
 - 🔴レーザー・📷監視カメラに無防備で踏み込むと警戒度が上昇する。警戒度が100%になると失敗。
 - 💂警備員（動かない）に無防備で踏み込むと、その場で見つかり即座に失敗になる。
-- 👮**警備員（巡回中）はあなたが1歩動くたびに1歩動きます。** 2マス以内に入ると
-  こちらへ寄ってきます。鉢合わせると即失敗。難易度が上がるほど人数が増えます。
-  角で待つ、引きつけてから回り込む——通り抜ける順番が勝負を分けます。
+- 👮**警備員（巡回中）はあなたが1歩動くたびに1歩動きます。** 真隣に来たときだけ
+  こちらへ寄ってきますが、追跡は完璧ではなく時々見失います。鉢合わせると即失敗。
+  難易度が上がるほど人数が増えます。1マス空けて通り過ぎる、隙を見て振り切る——
+  通り抜ける順番が勝負を分けます。
 
 **特性（開始時に1つ選択。対応する障害物を無効化できる。回数は難易度による）**
 - 💻ハッカー: 監視カメラを無効化
@@ -387,9 +389,10 @@ def move_patrols(
 ) -> list[tuple[int, int]]:
     """警備員を1歩ずつ動かし、動いた後の位置を返す。
 
-    プレイヤーが PATROL_DETECT 以内にいれば寄ってくる。そうでなければ今の向きへ
-    進み、壁に当たったら向きを変える。待つ・引きつけるという判断が生まれるように、
-    追跡は距離が近いときだけにしている。
+    プレイヤーが PATROL_DETECT 以内（既定は隣接のみ）にいれば寄ってくる。ただし
+    追跡中でも PATROL_LOSE_CHANCE の確率で見失い、その手番は巡回に戻る。完全な
+    追跡だと同速では振り切れず理不尽になるため、あえて隙を作っている。
+    検知圏の外では今の向きへ進み、壁に当たったら向きを変える。
     """
     if not gs.get("patrols"):
         return []
@@ -398,7 +401,8 @@ def move_patrols(
 
     for p in gs["patrols"]:
         pos = tuple(p["pos"])
-        if _manhattan(pos, player) <= PATROL_DETECT:
+        chasing = _manhattan(pos, player) <= PATROL_DETECT and rng.random() >= PATROL_LOSE_CHANCE
+        if chasing:
             step = _step_toward(pos, player)
         else:
             step = DIRECTIONS[p["dir"]]
@@ -885,7 +889,7 @@ def _render_playing(gs: dict[str, Any]) -> None:
     if gs.get("patrols"):
         st.caption(
             f"{PATROL_ICON} 巡回はあなたが動くたびに1歩動きます。"
-            f"{PATROL_DETECT}マス以内に入ると、こちらへ寄ってきます。"
+            "真隣に来たときだけ寄ってきますが、時々見失います。1マス空ければ通り過ぎられます。"
         )
 
     st.write("#### 移動")
