@@ -48,7 +48,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "density": 0.20,
         "charges": 4,
         "patrols": 0,
-        "items": {"emp": 3, "smoke": 3, "mirror": 3, "drone": 2},
+        "item_count": 3,
         "loot": 1,
         "desc": "6×6の小さな館。警備員は持ち場を動かず、道具にも余裕がある。まずはここから。",
     },
@@ -60,7 +60,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "density": 0.32,
         "charges": 3,
         "patrols": 1,
-        "items": {"emp": 2, "smoke": 2, "mirror": 2, "drone": 1},
+        "item_count": 2,
         "loot": 2,
         "desc": "7×7。巡回する警備員が1人。持ち場を離れて動き回る。",
     },
@@ -72,7 +72,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "density": 0.42,
         "charges": 2,
         "patrols": 2,
-        "items": {"emp": 1, "smoke": 1, "mirror": 1, "drone": 1},
+        "item_count": 2,
         "loot": 2,
         "desc": "8×8。巡回2人。警備が厚く道具も乏しい。通る道をよく選ぶこと。",
     },
@@ -84,9 +84,9 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "density": 0.46,
         "charges": 2,
         "patrols": 3,
-        "items": {"emp": 1, "smoke": 1, "mirror": 0, "drone": 0},
+        "item_count": 1,
         "loot": 3,
-        "desc": "9×9。巡回3人。鏡もドローンも無い。館の記憶と勘だけが頼り。",
+        "desc": "9×9。巡回3人。持ち込める道具は1つだけ。館の記憶と勘だけが頼り。",
     },
 }
 DEFAULT_DIFFICULTY = state.DEFAULT_LEVEL
@@ -169,8 +169,21 @@ ITEMS: dict[str, dict[str, str]] = {
     "drone": {"label": "ドローン", "emoji": "🛸", "counters": "reveal", "desc": "マップ全体を偵察して可視化する。"},
 }
 ITEM_ORDER = ["emp", "smoke", "mirror", "drone"]
-ITEM_START_COUNTS = {"emp": 2, "smoke": 2, "mirror": 2, "drone": 1}
 ITEM_FOR_HAZARD = {CELL_LASER: "mirror", CELL_CAMERA: "emp", CELL_GUARD: "smoke"}
+DEFAULT_ITEM = "emp"
+
+
+def empty_items() -> dict[str, int]:
+    """全アイテム0個の所持表。潜入時に選んだ1種類だけ個数が入る。"""
+    return {k: 0 for k in ITEM_ORDER}
+
+
+def loadout(item_key: str, count: int) -> dict[str, int]:
+    """選んだ1種類だけ count 個、他は0個の所持表を返す。"""
+    items = empty_items()
+    if item_key in items:
+        items[item_key] = count
+    return items
 
 HOW_TO_PLAY = """
 **目的**: 博物館に忍び込み、💎宝石を手に入れて🚪出口から脱出しよう。
@@ -178,11 +191,13 @@ HOW_TO_PLAY = """
 **進め方**
 1. 潜入する館（難易度）を選ぶ。広さ・警備の厚さ・持ち時間・道具の数が変わる。
    「🎲 別の館にする」で同じ難易度のまま別の間取りを引き直せる。
-2. 得意な特性を1つ選ぶ（対応する障害物を数回まで無効化できる）。
-3. **キーボードの十字キー（← ↑ ↓ →）** か ⬆️⬇️⬅️➡️ ボタンで移動する
+2. **持ち込むアイテムを1種類だけ選ぶ**（EMP/煙幕/鏡/ドローンから1つ）。
+   個数は難易度による。何を持って行くかが攻略の要になる。
+3. 得意な特性を1つ選ぶ（対応する障害物を数回まで無効化できる）。
+4. **キーボードの十字キー（← ↑ ↓ →）** か ⬆️⬇️⬅️➡️ ボタンで移動する
    （1手ごとにターンを消費）。
-4. 💎宝石のマスに入ると自動的に回収する。
-5. 宝石を持って🚪出口のマスに入れば脱出成功（勝利）。
+5. 💎宝石のマスに入ると自動的に回収する。
+6. 宝石を持って🚪出口のマスに入れば脱出成功（勝利）。
 
 **障害物**
 - 🔴レーザー・📷監視カメラに無防備で踏み込むと警戒度が上昇する。警戒度が100%になると失敗。
@@ -198,9 +213,11 @@ HOW_TO_PLAY = """
 - 🎭幻術師: 鉢合わせをやり過ごせるうえ、**ボタンで近くの巡回をまとめて遠ざけられる**
   （巡回のいない館では出番がありません）
 
-**アイテム（対応する障害物に入ったとき自動で消費される）**
+**アイテムは1種類だけ持ち込めます（潜入前に選択）**
 - ⚡EMP: カメラを一時停止 / 💨煙幕: 警備員をやり過ごす / 🪞鏡: レーザーを反射
-- 🛸ドローンだけはボタンで手動使用。使うとマップ全体が見えるようになる（それ以外は歩いた周辺しか見えない）。
+  （対応する障害物に無防備で入ったとき自動で消費される）
+- 🛸ドローン: ボタンで手動使用。使うとマップ全体が見えるようになる
+  （持ち込まなければ、歩いた周辺しか見えない）。
 
 **その他**
 - ターン数か警戒度が上限に達すると脱出失敗。
@@ -478,7 +495,8 @@ def _default_state() -> dict[str, Any]:
         "patrols": [],
         "trait": None,
         "trait_charges": 0,
-        "items": dict(ITEM_START_COUNTS),
+        "chosen_item": DEFAULT_ITEM,
+        "items": empty_items(),
         "max_turns": MAX_TURNS,
         "rng_seed": random.randrange(1_000_000_000),
         "map": None,
@@ -513,10 +531,16 @@ def reroll_map(gs: dict[str, Any]) -> None:
         gs["rng_seed"] = random.randrange(1_000_000_000)
 
 
-def select_trait(gs: dict[str, Any], trait_key: str, difficulty_key: str | None = None) -> None:
+def select_trait(
+    gs: dict[str, Any],
+    trait_key: str,
+    difficulty_key: str | None = None,
+    item_key: str | None = None,
+) -> None:
     """特性を確定し、選んだ難易度でマップを生成してプレイ開始状態にする。
 
     difficulty_key は遊び方画面で選ばれた難易度。省略時は state に入っている値。
+    item_key は持ち込むアイテム1種類。省略時は gs["chosen_item"]（既定 EMP）。
     """
     if gs["phase"] != "trait_select" or trait_key not in TRAITS:
         return
@@ -524,9 +548,11 @@ def select_trait(gs: dict[str, Any], trait_key: str, difficulty_key: str | None 
         gs["difficulty"] = difficulty_key
     diff = DIFFICULTIES[gs.get("difficulty", DEFAULT_DIFFICULTY)]
 
+    chosen = item_key if item_key in ITEM_ORDER else gs.get("chosen_item", DEFAULT_ITEM)
     gs["trait"] = trait_key
     gs["trait_charges"] = diff["charges"]
-    gs["items"] = dict(diff["items"])
+    gs["chosen_item"] = chosen
+    gs["items"] = loadout(chosen, diff["item_count"])
     gs["max_turns"] = diff["turns"]
 
     rng = random.Random(gs["rng_seed"])
@@ -748,6 +774,7 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
     gs["difficulty"] = level
     diff = DIFFICULTIES[level]
 
+    item_count = diff["item_count"]
     st.subheader(f"潜入する館：{diff['emoji']} {diff['label']}")
     st.caption(diff["desc"])
     ui.metric_row(
@@ -756,7 +783,7 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
             ("持ち時間", f"{diff['turns']}手"),
             ("巡回する警備員", f"{diff['patrols']}人"),
             ("特性の使用回数", f"{diff['charges']}回"),
-            ("道具の総数", sum(diff["items"].values())),
+            ("道具の個数", f"{item_count}個"),
         ]
     )
 
@@ -768,7 +795,22 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
     st.caption(f"館の見取り図: #{gs['rng_seed']}　同じ番号なら同じ間取りになる。")
 
     st.divider()
-    st.subheader("特性を1つ選ぶ（選ぶと潜入開始）")
+    st.subheader("① 持ち込むアイテムを1種類選ぶ")
+    st.caption(f"1種類だけ、{item_count}個 持ち込めます。障害物に無防備で入ったとき自動で使われます（ドローンは手動）。")
+    chosen = st.radio(
+        "アイテム",
+        options=ITEM_ORDER,
+        index=ITEM_ORDER.index(gs.get("chosen_item", DEFAULT_ITEM)),
+        format_func=lambda k: f"{ITEMS[k]['emoji']} {ITEMS[k]['label']}",
+        horizontal=True,
+        label_visibility="collapsed",
+        key="mus_item",
+    )
+    gs["chosen_item"] = chosen
+    st.caption(f"　{ITEMS[chosen]['emoji']} {ITEMS[chosen]['label']}: {ITEMS[chosen]['desc']}")
+
+    st.divider()
+    st.subheader("② 特性を1つ選ぶ（選ぶと潜入開始）")
 
     cols = st.columns(4)
     for col, key in zip(cols, TRAIT_ORDER):
@@ -781,7 +823,7 @@ def _render_trait_select(gs: dict[str, Any]) -> None:
                 if key == "illusionist" and diff["patrols"] == 0:
                     st.caption("⚠️ この館に巡回はいない。幻影を出す相手がいない。")
                 if st.button("この特性で潜入する", key=f"mus_trait_{key}", use_container_width=True):
-                    select_trait(gs, key, level)
+                    select_trait(gs, key, level, chosen)
                     st.rerun()
 
 
@@ -895,19 +937,21 @@ def _render_playing(gs: dict[str, Any]) -> None:
             st.rerun()
 
     st.write("#### 所持アイテム")
-    item_cols = st.columns(4)
-    for col, key in zip(item_cols, ITEM_ORDER):
-        info = ITEMS[key]
-        with col:
-            st.metric(f"{info['emoji']} {info['label']}", gs["items"][key])
-    if st.button(
-        "🛸 ドローン偵察を使う（マップ全体を可視化）",
-        key="mus_use_drone",
-        use_container_width=True,
-        disabled=gs["items"]["drone"] <= 0 or gs["revealed_all"],
-    ):
-        use_drone(gs)
-        st.rerun()
+    carried = gs.get("chosen_item", DEFAULT_ITEM)
+    info = ITEMS[carried]
+    st.metric(f"{info['emoji']} {info['label']}", gs["items"].get(carried, 0))
+    if carried == "drone":
+        st.caption("🛸 ドローンは下のボタンで手動使用。")
+        if st.button(
+            "🛸 ドローン偵察を使う（マップ全体を可視化）",
+            key="mus_use_drone",
+            use_container_width=True,
+            disabled=gs["items"].get("drone", 0) <= 0 or gs["revealed_all"],
+        ):
+            use_drone(gs)
+            st.rerun()
+    else:
+        st.caption(f"{info['emoji']} {info['label']}は、対応する障害物に無防備で入ると自動で使われます。")
 
     if gs["log"]:
         st.write("#### 状況ログ")

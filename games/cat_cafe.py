@@ -43,7 +43,13 @@ PRICE_REF = 900  # この価格を基準に客の反応が変わる
 BASE_DAILY_COST = 900  # 家賃・光熱費など固定費
 CAT_CARE_COST = 300  # 猫の餌代などの固定費
 
-BANKRUPTCY_LIMIT = -4000  # これを下回ると経営破綻でゲームオーバー
+BANKRUPTCY_LIMIT = -4000  # 難易度に bankruptcy_limit が無い場合のフォールバック
+
+# 連続赤字（その日の利益がマイナス）が続くと信用を失う。
+# 資金の破産ラインとは別の、もう一つの失敗条件。
+DEFICIT_WARN_STREAK = 2        # これ以上続くと評価が余分に下がり始める
+DEFICIT_REP_PENALTY = 6.0      # 警告ラインを超えた1日ごとに評価から引く点
+DEFICIT_BANKRUPTCY_STREAK = 3  # これだけ連続で赤字だと信用を失い経営破綻
 
 # 猫のコンディションの目盛り。UI で「いくつまであるのか」を必ず示すために使う。
 CAT_STAT_MAX = 100
@@ -153,6 +159,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "cats": 4,
         "cost_scale": 0.8,
         "forecast_acc": 0.85,
+        "bankruptcy_limit": -3000,
         "desc": "10日・資金8,000円・猫4匹。固定費も安く、合格ラインは50点。",
     },
     "normal": {
@@ -164,6 +171,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "cats": 3,
         "cost_scale": 1.0,
         "forecast_acc": 0.72,
+        "bankruptcy_limit": -2000,
         "desc": "10日・資金5,000円・猫3匹。標準の経営。合格ラインは60点。",
     },
     "hard": {
@@ -175,6 +183,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "cats": 3,
         "cost_scale": 1.25,
         "forecast_acc": 0.60,
+        "bankruptcy_limit": -1000,
         "desc": "12日・資金3,500円・猫3匹。家賃が高く、合格ラインは68点。",
     },
     "expert": {
@@ -186,6 +195,7 @@ DIFFICULTIES: dict[str, dict[str, Any]] = {
         "cats": 2,
         "cost_scale": 1.5,
         "forecast_acc": 0.50,
+        "bankruptcy_limit": -300,
         "desc": "14日・資金2,000円・猫2匹。猫が少なく休ませる余裕もない。合格ラインは75点。",
     },
 }
@@ -255,9 +265,12 @@ HOW_TO_PLAY = f"""
 **ランダムイベント**: 雨・テレビ紹介・SNSで話題・猫の脱走などが日替わりで発生し、
 来客数や猫の状態、コストに影響します。
 
-**資金が {BANKRUPTCY_LIMIT:,} 円を下回ると経営破綻で即ゲームオーバーです。**
+**経営破綻（ゲームオーバー）には2つの条件があります**
+- 資金が難易度ごとの破産ライン（易しいほど深く、難しいほど0円に近い）を下回る。
+- **{DEFICIT_BANKRUPTCY_STREAK}日連続で赤字（その日の利益がマイナス）になると、信用を失って破綻します。**
+  {DEFICIT_WARN_STREAK}日続いた時点から評価も下がり始めるので、赤字は早めに止めましょう。
 
-**難易度によって、営業日数・初期資金・合格ライン・猫の頭数・固定費が変わります。**
+**難易度によって、営業日数・初期資金・合格ライン・猫の頭数・固定費・破産ラインが変わります。**
 """
 
 
@@ -362,6 +375,8 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
     reputation = gamestate["reputation"]
     facility_level = gamestate["facility_level"]
     cost_scale = gamestate.get("cost_scale", 1.0)
+    bankruptcy_limit = gamestate.get("bankruptcy_limit", BANKRUPTCY_LIMIT)
+    deficit_streak = gamestate.get("deficit_streak", 0)
 
     price = settings["price"]
     ad_level = settings["ad_level"]
@@ -462,10 +477,26 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         satisfaction += event["satisfaction_delta"]
         satisfaction = _clamp(satisfaction, 0, 100)
 
-    reputation_delta = (satisfaction - reputation) * 0.22 + rng.uniform(-1.5, 1.5)
-    new_reputation = _clamp(reputation + reputation_delta, 0, 100)
+    # --- 連続赤字の判定 ---
+    # その日の利益がマイナスなら赤字。連続すると信用（評価）を失い、
+    # 一定日数続くと資金に関わらず経営破綻する。
+    new_deficit_streak = deficit_streak + 1 if profit < 0 else 0
+    deficit_penalty = 0.0
+    if new_deficit_streak >= DEFICIT_WARN_STREAK:
+        deficit_penalty = DEFICIT_REP_PENALTY * (new_deficit_streak - DEFICIT_WARN_STREAK + 1)
 
-    bankrupt = new_funds <= BANKRUPTCY_LIMIT
+    reputation_delta = (satisfaction - reputation) * 0.22 + rng.uniform(-1.5, 1.5)
+    new_reputation = _clamp(reputation + reputation_delta - deficit_penalty, 0, 100)
+
+    # 破産条件は2つ: 資金が破産ラインを下回る / 連続赤字が続いて信用を失う。
+    funds_bankrupt = new_funds <= bankruptcy_limit
+    credit_bankrupt = new_deficit_streak >= DEFICIT_BANKRUPTCY_STREAK
+    bankrupt = funds_bankrupt or credit_bankrupt
+    bankrupt_reason = ""
+    if funds_bankrupt:
+        bankrupt_reason = "資金が底をつきました"
+    elif credit_bankrupt:
+        bankrupt_reason = f"{new_deficit_streak}日連続の赤字で信用を失いました"
 
     result: dict[str, Any] = {
         "event": event,
@@ -493,12 +524,17 @@ def simulate_day(gamestate: dict[str, Any], settings: dict[str, Any], rng: rando
         "load": load,
         "equipment_invested": invest_equipment,
         "bankrupt": bankrupt,
+        "bankrupt_reason": bankrupt_reason,
+        "deficit_streak": new_deficit_streak,
+        "deficit_penalty": deficit_penalty,
         "gamestate": {
             "funds": new_funds,
             "reputation": new_reputation,
             "cats": new_cats,
             "facility_level": new_facility_level,
             "cost_scale": cost_scale,
+            "bankruptcy_limit": bankruptcy_limit,
+            "deficit_streak": new_deficit_streak,
         },
     }
     # 客の声はその日の結果から導くので、結果が揃ってから最後に組み立てる。
@@ -730,6 +766,8 @@ def _default_state(level: str | None = None) -> dict[str, Any]:
         "total_days": cfg["days"],
         "win_threshold": cfg["win"],
         "cost_scale": cfg["cost_scale"],
+        "bankruptcy_limit": cfg.get("bankruptcy_limit", BANKRUPTCY_LIMIT),
+        "deficit_streak": 0,
         "reputation": 50.0,
         "cats": create_cats(cfg["cats"], random.Random(seed)),
         "facility_level": 0,
@@ -763,29 +801,54 @@ def render() -> None:
         _render_gameover(s)
 
 
-def _render_cat_condition(cats: list[dict[str, Any]], resting_ids: set[int] | None = None) -> None:
-    """猫たちの状態を「いくつまであるのか」「どちらへ動かしたいのか」が分かる形で出す。
+def _mood_word(v: int) -> str:
+    if v >= 80:
+        return "ごきげん"
+    if v >= CAT_MOOD_GOOD:
+        return "上機嫌"
+    if v >= 40:
+        return "ふつう"
+    if v >= 20:
+        return "不機嫌"
+    return "ごきげん斜め"
 
-    数字だけだと 70 が高いのか低いのかが読めないので、上限とバーを必ず添える。
-    """
+
+def _fatigue_word(v: int) -> str:
+    if v < 30:
+        return "元気"
+    if v <= 60:
+        return "ややお疲れ"
+    if v <= CAT_FATIGUE_WARN:
+        return "お疲れ"
+    return "くたくた"
+
+
+def _popularity_word(v: int) -> str:
+    if v >= 70:
+        return "看板級"
+    if v >= 45:
+        return "人気者"
+    if v >= 25:
+        return "そこそこ"
+    return "これから"
+
+
+def _render_cat_condition(cats: list[dict[str, Any]], resting_ids: set[int] | None = None) -> None:
+    """猫たちの状態を数値と日本語の一言で表示する（バーは使わず場所を取らない）。"""
     resting_ids = resting_ids or set()
-    st.markdown("**🐈 猫のコンディション**")
+    st.markdown("**🐈 猫のコンディション**（すべて 0〜100）")
     st.caption(
-        f"すべて 0〜{CAT_STAT_MAX} の目盛り。"
         f"😺機嫌は高いほど良い（{CAT_MOOD_GOOD}以上を保ちたい）／"
         f"😪疲労は低いほど良い（{CAT_FATIGUE_WARN}超で機嫌が下がる）／⭐人気は高いほど客が増える"
     )
     for c in cats:
-        b = CAT_BREEDS[c["breed"]]
-        with st.container(border=True):
-            head = f"**{cat_label(c)}**"
-            if c["id"] in resting_ids:
-                head += "　💤 今日はお休み"
-            st.markdown(head)
-            st.caption(b["desc"])
-            st.progress(_clamp(c["mood"], 0, 100) / 100, text=f"😺 機嫌　{c['mood']} / {CAT_STAT_MAX}")
-            st.progress(_clamp(c["fatigue"], 0, 100) / 100, text=f"😪 疲労　{c['fatigue']} / {CAT_STAT_MAX}")
-            st.progress(_clamp(c["popularity"], 0, 100) / 100, text=f"⭐ 人気　{c['popularity']} / {CAT_STAT_MAX}")
+        rest = "　💤 お休み" if c["id"] in resting_ids else ""
+        st.markdown(
+            f"**{cat_label(c)}**{rest}　　"
+            f"😺 機嫌 **{c['mood']}**（{_mood_word(c['mood'])}）・"
+            f"😪 疲労 **{c['fatigue']}**（{_fatigue_word(c['fatigue'])}）・"
+            f"⭐ 人気 **{c['popularity']}**（{_popularity_word(c['popularity'])}）"
+        )
 
 
 def _render_plan(s: dict[str, Any]) -> None:
@@ -812,8 +875,22 @@ def _render_plan(s: dict[str, Any]) -> None:
             "😿 " + "、".join(c["name"] for c in tired) +
             f" の疲労が {CAT_FATIGUE_WARN} を超えています。休ませることを検討しましょう。"
         )
+
+    limit = s["bankruptcy_limit"]
+    streak = s.get("deficit_streak", 0)
+    # 連続赤字はあと1日で破綻、という段階を強めに警告する。
+    if streak >= DEFICIT_BANKRUPTCY_STREAK - 1:
+        st.error(
+            f"🔴 {streak}日連続で赤字です。あと1日でも赤字だと信用を失い経営破綻します。"
+            "今日は黒字を死守しましょう。"
+        )
+    elif streak >= DEFICIT_WARN_STREAK:
+        st.warning(
+            f"⚠️ {streak}日連続の赤字で評価が下がっています。"
+            f"{DEFICIT_BANKRUPTCY_STREAK}日続くと破綻します。"
+        )
     if s["funds"] < 0:
-        st.warning(f"⚠️ 資金がマイナスです。{BANKRUPTCY_LIMIT:,} 円を下回ると経営破綻します。")
+        st.warning(f"💸 資金がマイナスです。{limit:,} 円を下回ると経営破綻します。")
 
     st.markdown(f"**設備レベル**: {FACILITY_LABELS[s['facility_level']]}（{s['facility_level']} / {FACILITY_MAX}）")
 
@@ -869,6 +946,8 @@ def _render_plan(s: dict[str, Any]) -> None:
             "cats": [dict(c) for c in s["cats"]],
             "facility_level": s["facility_level"],
             "cost_scale": s["cost_scale"],
+            "bankruptcy_limit": s["bankruptcy_limit"],
+            "deficit_streak": s["deficit_streak"],
         }
         rng = _day_rng(s)
         result = simulate_day(gamestate, settings, rng)
@@ -877,6 +956,7 @@ def _render_plan(s: dict[str, Any]) -> None:
         s["reputation"] = result["gamestate"]["reputation"]
         s["cats"] = result["gamestate"]["cats"]
         s["facility_level"] = result["gamestate"]["facility_level"]
+        s["deficit_streak"] = result["gamestate"]["deficit_streak"]
         s["pending_result"] = result
         s["bankrupt"] = result["bankrupt"]
         s["last_price"] = price
@@ -960,7 +1040,8 @@ def _render_result(s: dict[str, Any]) -> None:
         st.caption(f"🛠️ 設備をレベル {s['facility_level']} にアップグレードしました。")
 
     if result["bankrupt"]:
-        st.error("💥 資金がマイナス4,000円を下回りました。経営破綻です。")
+        reason = result.get("bankrupt_reason") or "経営が立ち行かなくなりました"
+        st.error(f"💥 {reason}。経営破綻です。")
         label = "結果を見る"
     elif s["day"] >= s["total_days"]:
         label = "結果を見る"
